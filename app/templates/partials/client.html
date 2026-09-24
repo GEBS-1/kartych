@@ -1,0 +1,31 @@
+<article>
+  <p class="cup-kicker">Гость</p>
+  <h2>Твои карты</h2>
+  <p class="muted">Сканируй QR на кассе — карта появится сама.</p>
+  <button type="button" id="scan-btn" class="scan-btn">Камера</button>
+  <p id="scan-status" class="flash">{{ flash }}</p>
+
+  {% if cards %}
+    {% for card in cards %}
+    <article class="shop-card">
+      <header>{{ card.name }} <small>{{ card.city }}</small></header>
+      {% for promo in card.promos %}
+      <p>{{ promo.title }}: {{ promo.current }} / {{ promo.goal }} {{ promo.unit }}</p>
+      {% endfor %}
+    </article>
+    {% endfor %}
+  {% else %}
+    <p class="muted">Пока пусто. Первый QR на кассе сам создаст карту.</p>
+  {% endif %}
+
+  {% if shops %}
+  <details class="more-block">
+    <summary>Найти точку</summary>
+    <ul class="shop-list">
+      {% for shop in shops %}
+      <li><strong>{{ shop.name }}</strong> <span class="muted">{{ shop.city or "точка" }}</span></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</article>

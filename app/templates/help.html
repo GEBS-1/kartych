@@ -1,0 +1,18 @@
+{% extends "site_base.html" %}
+{% block content %}
+<p class="eyebrow">MAX</p>
+<h1>Как открыть внутри MAX</h1>
+<p class="muted">Клиент сканирует QR — карта точки появляется с первого касания. Бизнес жмёт QR и камеру.</p>
+<article class="panel">
+  <h2>Мини-приложение</h2>
+  <ol>
+    <li>Кабинет партнёра MAX → бот Картыч.</li>
+    <li>Мини-приложение / Web App.</li>
+    <li>Вставь ссылку:</li>
+  </ol>
+  <label>Ссылка
+    <input value="{{ miniapp_url }}" readonly onclick="this.select()" />
+  </label>
+  <p style="margin-top:1rem"><a class="btn" href="https://max.ru/{{ bot_username }}">Открыть бота</a></p>
+</article>
+{% endblock %}

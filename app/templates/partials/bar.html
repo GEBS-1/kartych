@@ -1,0 +1,22 @@
+{% from "partials/icons.html" import icon %}
+{% set owner = user.is_owner %}
+{% set staff = user.in_business and not user.is_owner %}
+{% set place = bar_place|default('') %}
+{% set owner_links = [('analytics','/biz','chart','Аналитика'),('promos','/biz/promos','tag','Акции'),('qr','/biz/earn','qr','QR'),('games','/biz/games','game','Игры'),('settings','/settings','shop','Профиль')] %}
+{% set staff_links = [
+  ('analytics','/biz','chart','Аналитика') if user.can_stats else ('cards','/me','cards','Карты'),
+  ('scan','/biz/scan','search','Скан') if user.can_scan else ('league','/me/league','trophy','Лига'),
+  ('qr', '/biz/earn' if user.can_earn else '/me/qr', 'qr', 'QR'),
+  ('promos','/biz/promos','tag','Акции') if user.can_edit else ('shops','/me/shops','pin','Рядом'),
+  ('settings','/settings','shop','Профиль')
+] %}
+{% set guest_links = [('cards','/me','cards','Карты'),('league','/me/league','trophy','Лига'),('qr','/me/qr','qr','QR'),('shops','/me/shops','pin','Рядом'),('settings','/settings','user','Профиль')] %}
+{% set links = owner_links if owner else (staff_links if staff else guest_links) %}
+<nav class="cup-bar{% if place == 'top' %} cup-bar-top{% endif %}" aria-label="{% if place == 'top' %}Кабинет сверху{% else %}Главная навигация{% endif %}">
+{% for key, href, symbol, label in links %}
+  <a href="{{ href }}" class="bar-item{% if key == tab %} is-on{% endif %}{% if key == 'qr' %} bar-qr{% endif %}" {% if key == tab %}aria-current="page"{% endif %}{% if key == 'scan' and place != 'top' %} id="scan-btn" aria-label="Считать QR гостя"{% endif %}>
+    <span class="bar-icon">{{ icon(symbol) }}</span>
+    {% if key == 'qr' and place != 'top' %}<span class="sr-only">{{ label }}</span>{% else %}<span>{{ label }}</span>{% endif %}
+  </a>
+{% endfor %}
+</nav>

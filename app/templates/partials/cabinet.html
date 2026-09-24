@@ -1,0 +1,7 @@
+<section>
+  <p class="muted">{{ user.display_name }} · <a href="/settings">Настройки</a></p>
+  <div id="cabinet-body"
+       hx-get="/app/{{ tab }}"
+       hx-trigger="load once"
+       hx-swap="innerHTML"></div>
+</section>

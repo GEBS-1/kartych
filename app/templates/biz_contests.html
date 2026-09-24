@@ -1,0 +1,42 @@
+{% extends "site_base.html" %}{% block content %}
+<p class="eyebrow">{{ shop.name if shop else 'Твой бизнес' }}</p>
+<header class="page-heading"><h1>Акции</h1><a class="icon-button" href="#new-promo" aria-label="Добавить акцию">{{ icon('plus') }}</a></header>
+{% if not shop %}
+<section class="empty-state"><h2>Сначала добавь точку</h2><p>Затем можно настроить бонусы и подарки.</p><a href="/settings" class="btn">Настроить профиль</a></section>
+{% else %}
+{% for program in programs %}
+<article class="panel promo-card">
+  <div class="section-heading"><span class="badge {{ 'green' if program.is_active else '' }}">{{ 'Активна' if program.is_active else 'На паузе' }}</span>{{ icon('gift') }}</div>
+  <h2>{{ program.title }}</h2>
+  <p class="muted">{% if program.kind == 'quantity' %}{{ program.qty_required }} покупок{% elif program.kind == 'amount' %}{{ program.amount_required }} ₽{% else %}{{ program.stamps_required }} визитов{% endif %} → {{ program.reward_title }}{% if program.reward_bonus %} · +{{ program.reward_bonus }} баллов{% endif %}</p>
+  {% if program.is_active %}
+  <form method="post" action="/biz/promos/{{ program.id }}/link"><button class="btn full">Новая ссылка</button></form>
+  {% for link in promo_links.get(program.id, [])[:5] %}
+  <div class="invite-link">
+    <p>Гостям: {{ promo_site }}/{{ link.id }}</p>
+    <p>MAX: {{ promo_max }}p_{{ link.id }}</p>
+  </div>
+  {% else %}
+  <p class="footnote">Нажми «Новая ссылка» — получишь свежий адрес для гостей. Старые можно не использовать.</p>
+  {% endfor %}
+  {% endif %}
+  <form method="post" action="/biz/promos/{{ program.id }}/toggle"><button class="btn secondary small">{{ 'Приостановить' if program.is_active else 'Возобновить' }}</button></form>
+</article>
+{% else %}
+<p class="soft-banner">Создай первую акцию — дай гостям повод вернуться.</p>
+{% endfor %}
+<section class="panel" id="new-promo">
+  <h2>Новая акция</h2>
+  <p class="muted">По покупкам, визитам или сумме чека</p>
+  <form method="post" action="/biz/promo">
+    <label>Название<input name="title" required maxlength="160" placeholder="Каждый пятый кофе в подарок"></label>
+    <label>Условие<select name="kind"><option value="visits">Количество визитов</option><option value="quantity">Количество товаров в чеке</option><option value="amount">Сумма покупок, ₽</option></select></label>
+    <label>Сколько нужно накопить<input type="number" name="goal" min="1" max="1000000" required value="5"></label>
+    <label>Подарок<input name="reward" required maxlength="160" placeholder="Кофе в подарок"></label>
+    <label>Бонусы за достижение<input type="number" name="bonus" min="0" max="10000" value="0"></label>
+    <p class="footnote">После создания жми «Новая ссылка» сколько нужно раз — каждый раз будет новый адрес для MAX и сайта.</p>
+    <button class="btn full">Создать акцию {{ icon('plus') }}</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

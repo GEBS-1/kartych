@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="CupCard">
+  <rect width="128" height="128" fill="#12141a"/>
+  <path fill="#c8f04d" fill-rule="evenodd" d="M40 100V54h18L78 32l26 32-24 18 18 20-26 18-12-22H58V100H40Zm24-40 18 10-18 9z"/>
+</svg>

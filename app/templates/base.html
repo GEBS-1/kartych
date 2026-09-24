@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <link rel="icon" href="/static/favicon.png" type="image/png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <meta name="theme-color" content="#12141a" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112,700;112,800&family=Inter+Tight:wght@400;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/css/tokens.css?v=9" />
+    {% block extra_head %}{% endblock %}
+  </head>
+  <body>
+    {% block body %}{% endblock %}
+    <div id="scan-overlay" hidden>
+      <video id="scan-video" playsinline muted></video>
+      <p class="muted">Наведи на QR</p>
+      <button type="button" id="scan-cancel" class="btn-ghost">Закрыть</button>
+    </div>
+  </body>
+</html>

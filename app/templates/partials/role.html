@@ -1,0 +1,9 @@
+<section>
+  <p class="cup-kicker">Кто ты</p>
+  <h1>Выбери кабинет</h1>
+  <p>Гость сканирует QR и копит визиты. Бизнес создаёт точку, программу и видит своих людей.</p>
+  <form hx-post="/app/role" hx-target="#cabinet" hx-swap="innerHTML">
+    <button type="submit" name="role" value="client">Я гость</button>
+    <button type="submit" name="role" value="business" class="secondary">Я бизнес</button>
+  </form>
+</section>

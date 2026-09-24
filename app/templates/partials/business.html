@@ -1,0 +1,28 @@
+<article>
+  <p class="cup-kicker">Точка</p>
+  {% if shop %}
+    <h2>{{ shop.name }}</h2>
+    <p class="muted">QR гостю после продажи. Камера — для бонуса гостя.</p>
+    <div class="hero-actions">
+      <a class="btn" href="/biz/earn">QR</a>
+      <button type="button" id="scan-btn">Камера</button>
+    </div>
+    <p id="scan-status" class="flash"></p>
+    <div hx-get="/app/business/qr" hx-trigger="load, every 8s" hx-swap="outerHTML">
+      <p class="muted">Готовлю QR…</p>
+    </div>
+    <h3>Гости</h3>
+    {% if people %}
+      <ul class="shop-list">
+        {% for person in people %}
+        <li>{{ person.name }}{% if person.bonus %} — {{ person.bonus }} бонусов{% endif %}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">Первый скан гостя появится здесь.</p>
+    {% endif %}
+  {% else %}
+    <h2>Создай точку</h2>
+    {% include "partials/shop_form.html" %}
+  {% endif %}
+</article>

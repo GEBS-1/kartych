@@ -1,0 +1,28 @@
+{% extends "site_base.html" %}
+{% from "partials/icons.html" import icon %}
+{% block content %}
+{% if expired %}
+<a class="back-link" href="/">{{ icon('back') }} На главную</a>
+<header class="page-heading"><h1>Ссылка истекла</h1></header>
+<p class="muted">Попроси точку прислать новую. Старые ссылки специально меняются.</p>
+{% else %}
+{% if not user %}<a class="back-link" href="/">{{ icon('back') }} На главную</a>{% endif %}
+<p class="eyebrow">{{ shop.city or 'Картыч' }} · {{ shop.name }}</p>
+<header class="page-heading"><h1>{{ program.title }}</h1>{{ icon('gift') }}</header>
+<section class="panel">
+  <p class="muted">{{ rule }}{% if program.reward_bonus %} · +{{ program.reward_bonus }} баллов{% endif %}</p>
+  {% if not program.is_active %}<p class="notice">Акция на паузе.</p>
+  {% elif own %}<p class="notice">Это твоя акция. Новые ссылки для гостей создавай в кабинете.</p><a class="btn full" href="/biz/promos">К акциям точки</a>
+  {% elif linked %}
+  <p class="muted">Ты уже участвуешь. На кассе нажми QR — кассир считает код.</p>
+  <a class="btn full" href="/me/qr">{{ icon('qr') }} Дать QR</a>
+  {% elif user %}
+  <form method="post" action="/promo/{{ token }}/join"><button class="btn full">Участвовать</button></form>
+  {% else %}
+  <p class="muted">Зайди через MAX — карта точки появится, и на каждой покупке можно давать QR.</p>
+  <a class="btn full" href="/login?promo={{ token }}">Участвовать</a>
+  {% endif %}
+</section>
+<p class="footnote">После входа на кассе нажимай QR. Кассир считает код и записывает покупку в эту акцию.</p>
+{% endif %}
+{% endblock %}

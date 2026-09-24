@@ -1,0 +1,9 @@
+<section id="balance-card">
+  <h2>{{ visits }} из {{ goal }}</h2>
+  <div class="stamps" aria-hidden="true">
+    {% for i in range(goal) %}
+    <span class="stamp{% if i < visits %} is-on{% endif %}">{{ i + 1 }}</span>
+    {% endfor %}
+  </div>
+  <p class="muted">Обновлено {{ updated_at }} UTC · hx-trigger="every 1s"</p>
+</section>

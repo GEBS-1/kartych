@@ -1,0 +1,70 @@
+{% extends "site_base.html" %}
+{% block content %}
+<article class="meet">
+  <header class="meet-hero">
+    <p class="billboard">
+      <img src="/static/img/landing/hero.png" width="2153" height="730" alt="Картыч. Больше возможностей рядом!">
+    </p>
+    <p class="eyebrow">КАРТЫЧ</p>
+    <h1>Карты любимых мест — в одном кармане</h1>
+    <p class="muted">Картыч собирает карты лояльности кафе, магазинов и студий. Гость сканирует QR и копит баллы. Точка узнаёт своих людей и дарит подарки за визиты.</p>
+  </header>
+
+  <section class="meet-story">
+    <figure class="photo-slot">
+      <img src="/static/img/landing/guest.png" width="1536" height="1024" alt="Карты любимых мест в приложении Картыч">
+    </figure>
+    <div>
+      <h2>Для гостя</h2>
+      <p>Одна карта вместо стопки пластиковых. Сканируешь QR на кассе — визит записан, баллы на месте, подарок ближе.</p>
+    </div>
+  </section>
+
+  <section class="meet-story reverse">
+    <figure class="photo-slot">
+      <img src="/static/img/landing/business.png" width="1672" height="941" alt="Касса и кабинет точки в Картыч">
+    </figure>
+    <div>
+      <h2>Для точки</h2>
+      <p>После покупки показываешь QR. Гость возвращается, акции считаются сами, видно кто приходит и что срабатывает.</p>
+    </div>
+  </section>
+
+  <section class="meet-how">
+    <h2>Как это работает</h2>
+    <div class="meet-steps">
+      <figure class="meet-step">
+        <span class="photo-slot">
+          <img src="/static/img/landing/start.png" width="1254" height="1254" alt="Вход в Картыч через MAX">
+        </span>
+        <figcaption><strong>1. Входишь через MAX</strong>Аккаунт появляется сам, без пароля.</figcaption>
+      </figure>
+      <figure class="meet-step">
+        <span class="photo-slot">
+          <img src="/static/img/landing/scan.png" width="1358" height="1159" alt="Сканирование QR на кассе">
+        </span>
+        <figcaption><strong>2. Сканируешь QR</strong>Касса показывает код — карта точки открывается.</figcaption>
+      </figure>
+      <figure class="meet-step">
+        <span class="photo-slot">
+          <img src="/static/img/landing/gift.png" width="1358" height="1159" alt="Подарок за визиты в Картыч">
+        </span>
+        <figcaption><strong>3. Копишь и забираешь</strong>Баллы, штампы и подарки — в одном месте.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="meet-cta">
+    {% if user %}
+    <h2>Привет, {{ user.first_name }}</h2>
+    <p class="muted">Кабинет уже готов. С главной всегда можно вернуться сюда.</p>
+    <a class="btn full" href="{{ user.cabinet_path }}">В кабинет {{ icon('arrow') }}</a>
+    {% else %}
+    <h2>Готов попробовать?</h2>
+    <p class="muted">Дальше выберешь, кто ты — гость или точка — и войдёшь через MAX.</p>
+    <a class="btn full" href="/login">Начать {{ icon('arrow') }}</a>
+    <a class="text-link" href="/login">Уже есть аккаунт? Войти</a>
+    {% endif %}
+  </section>
+</article>
+{% endblock %}

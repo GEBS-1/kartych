@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block extra_head %}{% endblock %}
+{% block body %}
+<main class="cup-shell" style="max-width: 52rem">
+  <p class="cup-kicker">Для бизнеса</p>
+  <h1>Дашборд</h1>
+  <p class="muted">Каркас: pandas + Plotly. Живые метрики появятся после визитов.</p>
+  <article class="chart-card">{{ chart_html | safe }}</article>
+</main>
+{% endblock %}

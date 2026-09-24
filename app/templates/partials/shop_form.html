@@ -1,0 +1,15 @@
+<form hx-post="/app/shop" hx-target="#cabinet-body" hx-swap="innerHTML">
+  <label>Название
+    <input type="text" name="name" required value="{{ shop.name if shop else '' }}" placeholder="Моя точка" />
+  </label>
+  <label>Город
+    <input type="text" name="city" value="{{ shop.city if shop else '' }}" placeholder="Москва" />
+  </label>
+  <label>Визитов до подарка
+    <input type="number" name="stamps" min="2" max="12" value="{{ program.stamps_required if program else 7 }}" />
+  </label>
+  <label>Подарок
+    <input type="text" name="reward" value="{{ program.reward_title if program else 'Подарок' }}" placeholder="скидка, товар, услуга" />
+  </label>
+  <button type="submit">Сохранить</button>
+</form>

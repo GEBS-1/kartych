@@ -1,0 +1,16 @@
+{% extends "site_base.html" %}
+{% block content %}
+<p class="eyebrow">Точки</p>
+<h1>Партнёры</h1>
+<p class="muted">Подключи карту сам или отсканируй QR на кассе — карта появится автоматически.</p>
+<div class="grid-3">
+{% for shop in shops %}
+<a class="shop-card" href="/shops/{{ shop.id }}">
+  <p class="eyebrow">{{ shop.city or "точка" }}</p>
+  <strong>{{ shop.name }}</strong>
+</a>
+{% else %}
+<p>Пока нет точек.</p>
+{% endfor %}
+</div>
+{% endblock %}

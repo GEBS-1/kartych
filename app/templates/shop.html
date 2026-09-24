@@ -1,0 +1,38 @@
+{% extends "site_base.html" %}
+{% block content %}
+<p class="muted"><a href="/shops">← Каталог</a></p>
+<p class="eyebrow">{{ shop.city }}</p>
+<h1>{{ shop.name }}</h1>
+<p class="muted">{{ shop.address }}</p>
+{% if user and user.role != "business" %}
+  <form method="post" action="/me/join/{{ shop.id }}"><button type="submit">Подключить карту</button></form>
+{% endif %}
+
+<div class="grid-2" style="margin-top:1.4rem">
+  <section>
+    <h2>Акции</h2>
+    {% for program in programs %}
+    <article class="panel" style="margin-bottom:.7rem">
+      <p class="eyebrow">{{ program.kind }}</p>
+      <strong>{{ program.title }}</strong>
+      <p class="muted">{{ rules[loop.index0] }}{% if program.reward_bonus %} · +{{ program.reward_bonus }} бонусов{% endif %}</p>
+    </article>
+    {% else %}
+    <p class="muted">Акций пока нет.</p>
+    {% endfor %}
+  </section>
+  <section>
+    <h2>Меню</h2>
+    {% for group, items in groups.items() %}
+    <article class="panel" style="margin-bottom:.7rem">
+      <p class="eyebrow">{{ group }}</p>
+      {% for product in items %}
+      <p>{{ product.name }} <span class="muted">{{ product.price_rub }} ₽</span></p>
+      {% endfor %}
+    </article>
+    {% else %}
+    <p class="muted">Меню ещё не заполнили.</p>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}

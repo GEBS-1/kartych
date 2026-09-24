@@ -1,0 +1,15 @@
+[Unit]
+Description=Cloudflare quick tunnel for CupCard
+After=network-online.target cupcard.service
+Wants=network-online.target cupcard.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8000
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/cloudflared-cupcard.log
+StandardError=append:/var/log/cloudflared-cupcard.log
+
+[Install]
+WantedBy=multi-user.target
