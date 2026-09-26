@@ -33,20 +33,11 @@ async function scanQr() {
   const box = document.getElementById("scan-overlay");
   if (!box || box.open) return;
   box.showModal();
-  scanStatus("Разреши доступ к камере или вставь код ниже.");
+  scanStatus("Открываю камеру…");
   const generation = ++scanner.generation;
   try {
-    const app = webApp();
-    if (app && typeof app.openCodeReader === "function") {
-      const result = await app.openCodeReader(false);
-      if (generation !== scanner.generation) return;
-      const code = typeof result === "string" ? result : result?.data || result?.code;
-      if (code) await submitCode(code);
-      else scanStatus("Сканирование отменено. Можно вставить код ниже.");
-      return;
-    }
     if (!navigator.mediaDevices?.getUserMedia) {
-      scanStatus("Камера недоступна. Открой приложение по HTTPS или вставь код ниже.");
+      scanStatus("Камера недоступна. Открой сайт по HTTPS или вставь код ниже.");
       return;
     }
     const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});
@@ -81,6 +72,18 @@ async function scanQr() {
     }
   } catch {
     stopCamera();
+    const app = webApp();
+    if (app && typeof app.openCodeReader === "function") {
+      scanStatus("Пробую сканер MAX…");
+      try {
+        const result = await app.openCodeReader(false);
+        if (generation !== scanner.generation) return;
+        const code = typeof result === "string" ? result : result?.data || result?.code;
+        if (code) await submitCode(code);
+        else scanStatus("Сканирование отменено. Можно вставить код ниже.");
+        return;
+      } catch {}
+    }
     scanStatus("Нет доступа к камере. Разреши его в настройках браузера или вставь код ниже.");
   }
 }
@@ -112,28 +115,61 @@ function filterRows() {
   });
   const empty = document.querySelector("[data-search-empty]");
   if (empty) empty.hidden = visible > 0;
-  if (window.cupMapMarkers) window.cupMapMarkers.forEach(({marker,id})=>{
-    const row = Array.from(document.querySelectorAll(".place-row")).find(r=>r.dataset.id===id);
-    if (row && !row.hidden) marker.addTo(window.cupMap);
-    else marker.remove();
+  if (window.cupMapMarkers) {
+    const shown = [];
+    window.cupMapMarkers.forEach(({marker,id})=>{
+      const row = Array.from(document.querySelectorAll(".place-row")).find(r=>r.dataset.id===id);
+      if (row && !row.hidden) { marker.addTo(window.cupMap); shown.push(marker); }
+      else marker.remove();
+    });
+    if (window.cupMap && shown.length === 1) {
+      const latlng = shown[0].getLatLng();
+      window.cupMap.setView(latlng, 15);
+    } else if (window.cupMap && shown.length > 1) {
+      window.cupMap.fitBounds(shown.map(m=>m.getLatLng()), {padding:[35,35], maxZoom:15});
+    }
+  }
+}
+function addFreeTiles(map) {
+  if (window.L?.Icon?.Default) L.Icon.Default.imagePath = "/static/vendor/leaflet/images/";
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  const opts = {maxZoom:19, className: dark ? "map-tiles-dark" : ""};
+  const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    ...opts,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   });
+  let switched = false;
+  osm.on("tileerror", () => {
+    if (switched) return;
+    switched = true;
+    map.removeLayer(osm);
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
+      ...opts,
+      attribution: "Tiles &copy; Esri"
+    }).addTo(map);
+  });
+  osm.addTo(map);
 }
 function setupMap() {
   const el = document.getElementById("places-map"), data = document.getElementById("map-data");
-  if (!el || !data || !window.L) return;
-  const places = JSON.parse(data.textContent);
-  if (!places.length) return;
+  if (!el || !window.L) return;
+  const places = data ? JSON.parse(data.textContent || "[]") : [];
   el.replaceChildren();
-  const map = L.map(el, {scrollWheelZoom:false}).setView([places[0].lat,places[0].lng],13);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',maxZoom:19}).addTo(map);
+  const start = places[0] ? [places[0].lat, places[0].lng] : [55.7558, 37.6173];
+  const map = L.map(el, {scrollWheelZoom:true}).setView(start, places.length ? 13 : 10);
+  addFreeTiles(map);
   window.cupMap = map;
   window.cupMapMarkers = places.map(place=>{
     const marker = L.marker([place.lat,place.lng],{icon:L.divIcon({className:"map-pin",iconSize:[24,24],iconAnchor:[12,24]})}).addTo(map);
+    const box = document.createElement("div");
     const link = document.createElement("a"); link.href="/shops/"+encodeURIComponent(place.id); link.textContent=place.name;
-    marker.bindPopup(link);
+    const meta = document.createElement("small"); meta.textContent=[place.city, place.address].filter(Boolean).join(" · ");
+    box.append(link, meta);
+    marker.bindPopup(box);
     return {marker,id:place.id};
   });
   if(places.length>1) map.fitBounds(places.map(p=>[p.lat,p.lng]),{padding:[35,35],maxZoom:14});
+  setTimeout(()=>map.invalidateSize(), 200);
 }
 document.addEventListener("click",async event=>{
   if(event.target.closest("#scan-btn, [data-open-scanner]")) {event.preventDefault();scanQr();}
@@ -168,5 +204,50 @@ document.querySelectorAll("[data-auto-submit]").forEach(input=>input.addEventLis
 window.addEventListener("pagehide",stopCamera);
 document.addEventListener("visibilitychange",()=>{if(document.hidden) closeOverlay();});
 try {const flash=sessionStorage.getItem("cup-flash");if(flash){toast(flash);sessionStorage.removeItem("cup-flash");setTimeout(()=>{document.getElementById("toast").hidden=true;},7000);}}catch {}
-setupMap(); waitMaxLogin();
+function setupTheme() {
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("kartych-theme", next); } catch {}
+    const color = next === "dark" ? "#12151c" : "#f3f5fa";
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", color);
+  });
+}
+function setupApplyMap() {
+  const el = document.getElementById("apply-map");
+  const lat = document.getElementById("apply-lat");
+  const lng = document.getElementById("apply-lng");
+  if (!el || !window.L) return;
+  const startLat = Number(lat?.value) || 55.7558;
+  const startLng = Number(lng?.value) || 37.6173;
+  const map = L.map(el, {scrollWheelZoom:true}).setView([startLat, startLng], lat?.value ? 15 : 10);
+  addFreeTiles(map);
+  setTimeout(()=>map.invalidateSize(), 200);
+  let marker = lat?.value && lng?.value ? L.marker([startLat, startLng]).addTo(map) : null;
+  const put = (point) => {
+    if (!lat || !lng) return;
+    lat.value = point.lat.toFixed(6);
+    lng.value = point.lng.toFixed(6);
+    if (marker) marker.setLatLng(point);
+    else marker = L.marker(point).addTo(map);
+    map.setView(point, 16);
+  };
+  map.on("click", event => put(event.latlng));
+  document.getElementById("geocode-btn")?.addEventListener("click", async () => {
+    const form = document.getElementById("apply-form");
+    const q = ["city","address","name"].map(name => form?.elements[name]?.value || "").join(" ").trim();
+    if (q.length < 3) { toast("Укажи город и адрес"); return; }
+    try {
+      const response = await fetch("/biz/geocode", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({q})});
+      const data = await response.json();
+      if (!data.ok) { toast(data.message || "Адрес не найден"); return; }
+      put({lat: data.lat, lng: data.lng});
+    } catch { toast("Не удалось определить адрес"); }
+  });
+}
+setupMap(); setupApplyMap(); setupTheme(); waitMaxLogin();
+if (document.body.dataset.page === "scan" || /\/scan\/?$/.test(location.pathname)) scanQr();
 

@@ -14,34 +14,18 @@
   <p class="eyebrow">КАРТЫЧ · MAX</p>
   {% if invite %}
   <h1>Тебя пригласили кассиром</h1>
-  <p class="muted">Подтверди вход через MAX — откроется кабинет точки с теми правами, которые выдал владелец.</p>
+  <p class="muted">Подтверди вход через MAX — откроется сканер точки с теми правами, которые выдал владелец.</p>
   {% elif promo %}
   <h1>Участвовать в акции</h1>
   <p class="muted">Подтверди вход через MAX. Потом на кассе нажимай QR — кассир запишет покупку.</p>
   {% else %}
-  <h1>Кто ты?</h1>
-  <p class="muted">Сначала выбери роль. MAX подтвердит вход — так появляется аккаунт.</p>
+  <h1>Войти как гость</h1>
+  <p class="muted">Все заходят как клиенты. Аккаунт появляется после MAX. Если есть точка — потом отправишь заявку, и мы её подтвердим.</p>
   {% endif %}
   {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
   <form method="post" action="/login">
-    {% if invite %}
-    <input type="hidden" name="invite" value="{{ invite }}">
-    <input type="hidden" name="role" value="client">
-    {% elif promo %}
-    <input type="hidden" name="promo" value="{{ promo }}">
-    <input type="hidden" name="role" value="client">
-    {% else %}
-    <div class="role-pick">
-      <label>
-        <input type="radio" name="role" value="client" {% if role != 'business' %}checked{% endif %}>
-        Я гость
-      </label>
-      <label>
-        <input type="radio" name="role" value="business" {% if role == 'business' %}checked{% endif %}>
-        У меня точка
-      </label>
-    </div>
-    {% endif %}
+    {% if invite %}<input type="hidden" name="invite" value="{{ invite }}">{% endif %}
+    {% if promo %}<input type="hidden" name="promo" value="{{ promo }}">{% endif %}
     <div class="landing-actions">
       <button class="btn full" type="submit">Войти через MAX</button>
       <button class="btn secondary full" type="submit">Зарегистрироваться</button>

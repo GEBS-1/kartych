@@ -25,12 +25,14 @@ def test_bot_started_echo(client, app) -> None:
     assert kwargs["attachments"]
     buttons = kwargs["attachments"][0]["payload"]["buttons"]
     assert buttons[0][0]["type"] == "callback"
-    assert buttons[0][0]["text"] == "Считать QR"
-    assert buttons[0][0]["payload"] == "scan"
+    assert buttons[0][0]["text"] == "Показать QR"
+    assert buttons[0][0]["payload"] == "showqr"
     assert buttons[1][0]["type"] == "callback"
-    assert buttons[1][0]["text"] == "Открыть приложение"
+    assert buttons[1][0]["text"] == "Открыть кабинет"
     assert buttons[1][0]["payload"] == "openapp"
-    assert len(buttons) == 2
+    assert buttons[2][0]["text"] == "Поддержка"
+    assert buttons[2][0]["payload"] == "help"
+    assert len(buttons) == 3
     assert all(btn["type"] != "link" for row in buttons for btn in row)
 
 

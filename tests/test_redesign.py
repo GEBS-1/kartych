@@ -32,6 +32,10 @@ def test_new_pages_and_navigation(client):
         assert response.status_code == 200
         assert heading in response.text
         assert "/static/css/design.css" in response.text
+    shops = client.get("/me/shops")
+    assert "/static/vendor/leaflet/leaflet.min.js" in shops.text
+    assert "cartocdn" not in shops.text
+    assert client.get("/static/vendor/leaflet/leaflet.min.js").status_code == 200
     sign_in(client, "business")
     for path in [
         "/biz",
@@ -41,6 +45,7 @@ def test_new_pages_and_navigation(client):
         "/biz/games",
         "/biz/clients",
         "/settings",
+        "/biz/staff",
         "/biz/scan",
     ]:
         assert client.get(path).status_code == 200

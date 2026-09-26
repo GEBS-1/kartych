@@ -20,6 +20,7 @@ def settings() -> Settings:
         public_base_url="https://example.test",
         subscribe_on_startup=False,
         watchdog_interval_seconds=15,
+        admin_max_user_ids="99001",
     )
 
 

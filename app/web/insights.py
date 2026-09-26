@@ -78,6 +78,23 @@ async def analytics(session, shop, period):
         for r in redemptions
         if r.note.startswith("Списание ") and r.note.split()[1].isdigit()
     )
+    earn_receipts = (
+        list(
+            (
+                await session.scalars(
+                    select(Receipt).where(
+                        Receipt.business_id == shop.id,
+                        Receipt.kind == "earn",
+                        Receipt.created_at >= start,
+                        Receipt.amount_rub > 0,
+                    )
+                )
+            ).all()
+        )
+        if shop
+        else []
+    )
+    avg_check = round(sum(r.amount_rub for r in earn_receipts) / len(earn_receipts)) if earn_receipts else 0
     per_day = Counter(e["at"].date() for e in current)
     peak = max(per_day.values(), default=1)
     chart = [
@@ -110,6 +127,7 @@ async def analytics(session, shop, period):
         "chart": chart,
         "people": people,
         "guests": len(customers),
+        "avg_check": avg_check,
         "period": period,
         "days": days,
     }

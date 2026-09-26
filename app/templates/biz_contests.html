@@ -1,14 +1,17 @@
 {% extends "site_base.html" %}{% block content %}
 <p class="eyebrow">{{ shop.name if shop else 'Твой бизнес' }}</p>
-<header class="page-heading"><h1>Акции</h1><a class="icon-button" href="#new-promo" aria-label="Добавить акцию">{{ icon('plus') }}</a></header>
+<header class="page-heading"><h1>Акции и игры</h1><a class="icon-button" href="#new-promo" aria-label="Добавить акцию">{{ icon('plus') }}</a></header>
 {% if not shop %}
-<section class="empty-state"><h2>Сначала добавь точку</h2><p>Затем можно настроить бонусы и подарки.</p><a href="/settings" class="btn">Настроить профиль</a></section>
+<section class="empty-state"><h2>Сначала добавь точку</h2><p>Затем можно настроить бонусы, подарки и задания.</p><a href="/settings" class="btn">Настроить профиль</a></section>
 {% else %}
 {% for program in programs %}
 <article class="panel promo-card">
-  <div class="section-heading"><span class="badge {{ 'green' if program.is_active else '' }}">{{ 'Активна' if program.is_active else 'На паузе' }}</span>{{ icon('gift') }}</div>
+  <div class="section-heading"><span class="badge {{ 'green' if program.is_active and not program.archived_at else '' }}">{% if program.archived_at %}Снята{% elif program.is_active %}Активна{% else %}На паузе{% endif %}</span>{{ icon('gift') }}</div>
   <h2>{{ program.title }}</h2>
   <p class="muted">{% if program.kind == 'quantity' %}{{ program.qty_required }} покупок{% elif program.kind == 'amount' %}{{ program.amount_required }} ₽{% else %}{{ program.stamps_required }} визитов{% endif %} → {{ program.reward_title }}{% if program.reward_bonus %} · +{{ program.reward_bonus }} баллов{% endif %}</p>
+  {% if program.archived_at %}
+  <p class="footnote">Гости, которые уже копили штампы, ничего не теряют. Новых участников акция больше не принимает.</p>
+  {% else %}
   {% if program.is_active %}
   <form method="post" action="/biz/promos/{{ program.id }}/link"><button class="btn full">Новая ссылка</button></form>
   {% for link in promo_links.get(program.id, [])[:5] %}
@@ -20,7 +23,11 @@
   <p class="footnote">Нажми «Новая ссылка» — получишь свежий адрес для гостей. Старые можно не использовать.</p>
   {% endfor %}
   {% endif %}
-  <form method="post" action="/biz/promos/{{ program.id }}/toggle"><button class="btn secondary small">{{ 'Приостановить' if program.is_active else 'Возобновить' }}</button></form>
+  <div class="form-grid">
+    <form method="post" action="/biz/promos/{{ program.id }}/toggle"><button class="btn secondary small">{{ 'Приостановить' if program.is_active else 'Возобновить' }}</button></form>
+    <form method="post" action="/biz/promos/{{ program.id }}/delete" onsubmit="return confirm('Снять акцию? Прогресс гостей сохранится.');"><button class="btn secondary small">Удалить акцию</button></form>
+  </div>
+  {% endif %}
 </article>
 {% else %}
 <p class="soft-banner">Создай первую акцию — дай гостям повод вернуться.</p>
@@ -36,6 +43,25 @@
     <label>Бонусы за достижение<input type="number" name="bonus" min="0" max="10000" value="0"></label>
     <p class="footnote">После создания жми «Новая ссылка» сколько нужно раз — каждый раз будет новый адрес для MAX и сайта.</p>
     <button class="btn full">Создать акцию {{ icon('plus') }}</button>
+  </form>
+</section>
+<section class="panel" id="games">
+  <h2>Игры и задания</h2>
+  <p class="muted">Гости выполняют задания на визиты и получают баллы на карту твоей точки.</p>
+  {% for item in challenges %}
+  <article class="staff-card">
+    <div class="section-heading"><span class="badge {{ 'green' if item.game.is_active else '' }}">{{ 'Активна' if item.game.is_active else 'На паузе' }}</span><strong>+{{ item.game.reward_bonus }} баллов</strong></div>
+    <h3>{{ item.game.title }}</h3>
+    <p class="muted">Совершить {{ item.game.goal }} визитов после запуска. Награда — один раз каждому гостю.</p>
+    <form method="post" action="/biz/games/{{ item.game.id }}/toggle"><button class="btn secondary small">{{ 'Приостановить' if item.game.is_active else 'Возобновить' }}</button></form>
+  </article>
+  {% else %}
+  <p class="footnote">Заданий пока нет. Первое появится в лиге у клиентов сразу после создания.</p>
+  {% endfor %}
+  <form method="post" action="/biz/games">
+    <label>Название задания<input name="title" required maxlength="160" placeholder="Стать постоянным гостем"></label>
+    <div class="form-grid"><label>Визитов<input name="goal" type="number" required min="1" max="100" value="3"></label><label>Награда, баллы<input name="bonus" type="number" required min="1" max="10000" value="50"></label></div>
+    <button class="btn full">Запустить задание</button>
   </form>
 </section>
 {% endif %}

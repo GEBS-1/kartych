@@ -46,7 +46,13 @@
         return;
       }
       const param = data.start_param || "";
-      window.location.replace(data.role === "business" ? "/biz" : param.endsWith("scan") ? "/me/scan" : "/me");
+      let next = "/me";
+      if (param.startsWith("s_")) next = "/biz/scan";
+      else if (param.startsWith("p_")) next = "/me/qr";
+      else if (data.role === "business") next = "/biz";
+      else if (param.endsWith("scan")) next = "/me/scan";
+      else if (param.endsWith("qr")) next = "/me/qr";
+      window.location.replace(next);
     } catch {
       showError("Не удалось восстановить вход. Проверяем соединение…");
     } finally { running = false; }

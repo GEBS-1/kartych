@@ -64,6 +64,11 @@ class Business(Base):
     address: Mapped[str] = mapped_column(String(200), default="")
     category: Mapped[str] = mapped_column(String(40), default="shop")
     owner_max_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    inn: Mapped[str] = mapped_column(String(12), default="")
+    director_name: Mapped[str] = mapped_column(String(160), default="")
+    website: Mapped[str] = mapped_column(String(240), default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     programs: Mapped[list[LoyaltyProgram]] = relationship(back_populates="business")
@@ -100,6 +105,7 @@ class LoyaltyProgram(Base):
     reward_title: Mapped[str] = mapped_column(String(160), default="Подарок")
     reward_bonus: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     business: Mapped[Business] = relationship(back_populates="programs")
@@ -224,6 +230,9 @@ class ShopStaff(Base):
     can_earn: Mapped[bool] = mapped_column(Boolean, default=True)
     can_scan: Mapped[bool] = mapped_column(Boolean, default=True)
     can_edit: Mapped[bool] = mapped_column(Boolean, default=False)
+    schedule_days: Mapped[str] = mapped_column(String(80), default="mon,tue,wed,thu,fri")
+    shift_from: Mapped[str] = mapped_column(String(5), default="10:00")
+    shift_to: Mapped[str] = mapped_column(String(5), default="22:00")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -239,6 +248,9 @@ class ShopInvite(Base):
     can_earn: Mapped[bool] = mapped_column(Boolean, default=True)
     can_scan: Mapped[bool] = mapped_column(Boolean, default=True)
     can_edit: Mapped[bool] = mapped_column(Boolean, default=False)
+    schedule_days: Mapped[str] = mapped_column(String(80), default="mon,tue,wed,thu,fri")
+    shift_from: Mapped[str] = mapped_column(String(5), default="10:00")
+    shift_to: Mapped[str] = mapped_column(String(5), default="22:00")
     used_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -254,4 +266,12 @@ class PromoLink(Base):
         ForeignKey("businesses.id", ondelete="CASCADE"), index=True
     )
     created_by: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PlatformAdmin(Base):
+    __tablename__ = "platform_admins"
+
+    max_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    added_by: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

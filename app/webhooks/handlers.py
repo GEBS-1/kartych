@@ -7,25 +7,28 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from sqlalchemy import select
+
 from app.api.max_client import MaxClient
-from app.db.models import UserRole
+from app.db.models import AppUser, UserRole
 from app.web.max_login import tickets
 from app.web.loyalty import (
     accept_staff_invite,
     apply_scan,
     business_people,
     client_cards,
-    create_shop,
     get_or_create_user,
     join_promo_token,
     live_qr_payload,
     parse_promo_start,
     parse_staff_start,
     shop_directory,
+    shop_for_member,
     shop_for_owner,
 )
 from app.webhooks.keyboards import (
     business_keyboard,
+    callback_button,
     client_keyboard,
     inline_keyboard,
     launch_app_keyboard,
@@ -39,14 +42,22 @@ _pending: dict[int, str] = {}
 
 WELCOME_TEXT = (
     "Привет{name_part}! Картыч — карты лояльности.\n\n"
-    "Иконка сверху — это MAX, так он открывает мини-приложение.\n"
-    "Кнопки ниже — наши: «Считать QR» и «Открыть приложение»."
+    "Кнопки под сообщением: «Показать QR», «Открыть кабинет» и «Поддержка»."
 )
 
 HELP_TEXT = (
-    "Гость показывает свой QR, кассир считает его и записывает покупку.\n"
-    "Или кассир показывает QR покупки с телефона — гость сканирует сам.\n"
-    "Списание баллов тоже подтверждает кассир в приложении."
+    "Частые вопросы\n\n"
+    "Как начислить покупку?\n"
+    "Гость нажимает «Показать QR», кассир — «Сканировать QR». "
+    "Или кассир показывает QR покупки, а гость сканирует сам.\n\n"
+    "Как списать баллы?\n"
+    "Гость открывает карту точки и создаёт QR списания. Кассир сканирует его.\n\n"
+    "Не открывается камера?\n"
+    "Разреши доступ в браузере или вставь текст QR вручную в приложении.\n\n"
+    "Пропала акция, а штампы были?\n"
+    "Накопленный прогресс не сгорает, даже если точку сняли акцию.\n\n"
+    "Как открыть точку?\n"
+    "Все входят как гости. В профиле отправь заявку с сайтом и меткой на карте — мы подтвердим кабинет."
 )
 
 
@@ -129,12 +140,30 @@ def callback_payload_of(update: dict[str, Any]) -> str:
     return str(callback.get("payload") or "")
 
 
-def start_keyboard(client: MaxClient, bot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def start_keyboard(
+    client: MaxClient, bot: dict[str, Any] | None = None, *, business: bool = False
+) -> list[dict[str, Any]]:
     return welcome_attachments(
         bot_username=client.settings.max_bot_username or str((bot or {}).get("username") or ""),
         bot_user_id=(bot or {}).get("user_id"),
         miniapp_url=client.settings.miniapp_url,
+        business=business,
     )
+
+
+def menu_button() -> list[dict[str, Any]]:
+    return [inline_keyboard([[callback_button("Меню", "home")]])]
+
+
+async def is_business_user(
+    session_factory: async_sessionmaker[AsyncSession] | None, user_id: int | None
+) -> bool:
+    if session_factory is None or user_id is None:
+        return False
+    async with session_factory() as session:
+        user = await session.scalar(select(AppUser).where(AppUser.max_user_id == user_id))
+        shop = await shop_for_member(session, user_id)
+        return bool(shop and user and user.role == UserRole.BUSINESS.value)
 
 
 def app_launch_keyboard(
@@ -198,8 +227,8 @@ async def handle_bot_started(
         item = tickets.peek(token)
         async with session_factory() as session:
             user = await get_or_create_user(session, user_id, name or "Гость MAX", username)
-            if item and item.get("role") in {"client", "business"} and not item.get("invite"):
-                user.role = item["role"]
+            if user.role == UserRole.NONE.value:
+                user.role = UserRole.CLIENT.value
             await session.commit()
         if tickets.complete(token, user_id):
             base = client.settings.public_base_url.rstrip("/")
@@ -245,10 +274,11 @@ async def handle_bot_started(
         )
         return
     name_part = f", {name}" if name else ""
+    business = await is_business_user(session_factory, user_id)
     await client.send_message(
         user_id=user_id,
         text=WELCOME_TEXT.format(name_part=name_part),
-        attachments=start_keyboard(client, bot),
+        attachments=start_keyboard(client, bot, business=business),
     )
 
 
@@ -279,14 +309,11 @@ async def handle_message_created(
     wait = _pending.get(user_id)
     if wait == "shop_name" and session_factory is not None:
         _pending.pop(user_id, None)
-        async with session_factory() as session:
-            user = await get_or_create_user(session, user_id, display_name_of(update), username_of(update))
-            shop = await create_shop(session, user, name=text, city="")
-            await session.commit()
+        base = client.settings.public_base_url.rstrip("/")
         await client.send_message(
             user_id=user_id,
-            text=f"Точка «{shop.name}» готова. Покажи гостю QR или пусть отметит визит в чате.",
-            attachments=business_keyboard(client),
+            text="Точку подтверждаем на сайте: название, сайт организации и метка на карте.",
+            attachments=[inline_keyboard([[link_button("Открыть заявку", f"{base}/biz/apply")]])],
         )
         return
     if wait == "scan" or text.startswith("cupcard:") or text.startswith("cc1:") or text.startswith(
@@ -307,10 +334,16 @@ async def handle_message_created(
     if lowered in {"/balance", "баланс", "карты"}:
         await _send_cards(client, user_id, display_name_of(update), username_of(update), session_factory)
         return
+    if lowered in {"/help", "help", "помощь", "поддержка", "faq", "вопросы"}:
+        await client.send_message(user_id=user_id, text=HELP_TEXT, attachments=menu_button())
+        return
+    if lowered in {"/menu", "меню", "menu"}:
+        await handle_bot_started(client, update, bot, session_factory=session_factory)
+        return
     await client.send_message(
         user_id=user_id,
-        text="Жми «Считать QR» или «Открыть приложение» под этим сообщением.",
-        attachments=start_keyboard(client, bot),
+        text="Нажми «Меню» — там «Показать QR», кабинет и поддержка.",
+        attachments=menu_button(),
     )
 
 
@@ -345,6 +378,17 @@ async def handle_message_callback(
             attachments=app_launch_keyboard(client, bot, payload="scan", label="Камера"),
         )
         return
+    if payload == "showqr":
+        await ack("QR")
+        business = await is_business_user(session_factory, user_id)
+        await client.send_message(
+            user_id=user_id,
+            text="Покажи QR на кассе." if not business else "Покажи гостю QR покупки.",
+            attachments=app_launch_keyboard(
+                client, bot, payload="qr", label="Показать QR"
+            ),
+        )
+        return
     if payload == "openapp":
         await ack("Приложение")
         await client.send_message(
@@ -355,7 +399,7 @@ async def handle_message_callback(
         return
     if payload == "help":
         await ack("Инструкция")
-        await client.send_message(user_id=user_id, text=HELP_TEXT, attachments=start_keyboard(client, bot))
+        await client.send_message(user_id=user_id, text=HELP_TEXT, attachments=menu_button())
         return
     if payload == "role:client":
         await ack("Кабинет гостя")
@@ -373,11 +417,14 @@ async def handle_message_callback(
         return
     if payload == "role:biz":
         await ack("Кабинет точки")
+        base = client.settings.public_base_url.rstrip("/")
         if session_factory is not None:
             async with session_factory() as session:
                 user = await get_or_create_user(session, user_id, display_name_of(update), username_of(update))
                 shop = await shop_for_owner(session, user_id)
-                if shop is not None:
+                from app.web.loyalty import shop_is_live
+
+                if shop is not None and shop_is_live(shop):
                     user.role = UserRole.BUSINESS.value
                     await session.commit()
                     await client.send_message(
@@ -389,8 +436,8 @@ async def handle_message_callback(
                 await session.commit()
         await client.send_message(
             user_id=user_id,
-            text="Кабинет точки. Создай точку — дальше гости отмечают визиты в этом же чате.",
-            attachments=business_keyboard(client),
+            text="Кабинет точки откроется после подтверждения заявки на сайте.",
+            attachments=[inline_keyboard([[link_button("Открыть заявку", f"{base}/biz/apply")]])],
         )
         return
     if payload == "dir":

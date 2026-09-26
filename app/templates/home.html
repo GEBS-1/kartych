@@ -61,10 +61,26 @@
     <a class="btn full" href="{{ user.cabinet_path }}">В кабинет {{ icon('arrow') }}</a>
     {% else %}
     <h2>Готов попробовать?</h2>
-    <p class="muted">Дальше выберешь, кто ты — гость или точка — и войдёшь через MAX.</p>
+    <p class="muted">Входишь через MAX как гость. Если есть точка — отправишь заявку, и мы её подтвердим.</p>
     <a class="btn full" href="/login">Начать {{ icon('arrow') }}</a>
     <a class="text-link" href="/login">Уже есть аккаунт? Войти</a>
     {% endif %}
   </section>
+
+  <section class="meet-how" id="faq">
+    <h2>Как это работает</h2>
+    <div class="meet-steps">
+      <figure class="meet-step">
+        <figcaption><strong>Гость</strong>На кассе жмёшь «Показать QR» — кассир считает код. Или сканируешь QR точки камерой. Карта и баллы появляются сами.</figcaption>
+      </figure>
+      <figure class="meet-step">
+        <figcaption><strong>Баллы и подарки</strong>Баллы действуют только в месте, которое их начислило. Если акцию снимут, уже накопленные визиты не сгорают.</figcaption>
+      </figure>
+      <figure class="meet-step">
+        <figcaption><strong>Точка</strong>Регистрируешься как гость, отправляешь заявку с сайтом и меткой на карте. После подтверждения открывается кабинет: QR, кассиры и акции.</figcaption>
+      </figure>
+    </div>
+  </section>
 </article>
 {% endblock %}
+

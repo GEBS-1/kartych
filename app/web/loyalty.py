@@ -16,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     AppUser,
     Business,
+    BusinessLocation,
     Customer,
     LoyaltyProgram,
+    PlatformAdmin,
     Product,
     Receipt,
     PromoLink,
@@ -34,6 +36,81 @@ QR_SLOT = 30
 INVITE_TTL = timedelta(days=7)
 STAFF_START = "s_"
 PROMO_START = "p_"
+WEEKDAYS = (
+    ("mon", "Пн"),
+    ("tue", "Вт"),
+    ("wed", "Ср"),
+    ("thu", "Чт"),
+    ("fri", "Пт"),
+    ("sat", "Сб"),
+    ("sun", "Вс"),
+)
+DEFAULT_DAYS = "mon,tue,wed,thu,fri"
+
+
+def inn_digits(value: str) -> str:
+    return "".join(char for char in (value or "") if char.isdigit())
+
+
+def valid_inn(value: str) -> bool:
+    digits = inn_digits(value)
+    if len(digits) == 10:
+        coef = (2, 4, 10, 3, 5, 9, 4, 6, 8)
+        check = sum(int(digits[i]) * coef[i] for i in range(9)) % 11 % 10
+        return check == int(digits[9])
+    if len(digits) == 12:
+        first = (7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
+        second = (3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
+        n11 = sum(int(digits[i]) * first[i] for i in range(10)) % 11 % 10
+        n12 = sum(int(digits[i]) * second[i] for i in range(11)) % 11 % 10
+        return n11 == int(digits[10]) and n12 == int(digits[11])
+    return False
+
+
+def valid_fio(value: str) -> bool:
+    parts = [part for part in (value or "").replace("ё", "е").split() if part]
+    if len(parts) < 2 or len(parts) > 4:
+        return False
+    allowed = set("абвгдежзийклмнопрстуфхцчшщъыьэюя-")
+    return all(set(part.lower()) <= allowed and len(part) >= 2 for part in parts)
+
+
+def normalize_schedule(days: list[str] | str | None, start: str, end: str) -> tuple[str, str, str]:
+    wanted = {item for item, _label in WEEKDAYS}
+    if isinstance(days, str):
+        picked = [item.strip() for item in days.split(",") if item.strip() in wanted]
+    else:
+        picked = [item for item in (days or []) if item in wanted]
+    if not picked:
+        picked = DEFAULT_DAYS.split(",")
+    start = start.strip()[:5] or "10:00"
+    end = end.strip()[:5] or "22:00"
+    return ",".join(picked), start, end
+
+
+def schedule_label(days: str, start: str, end: str) -> str:
+    names = dict(WEEKDAYS)
+    labels = [names[item] for item in (days or "").split(",") if item in names]
+    hours = f"{start or '10:00'}–{end or '22:00'}"
+    return f"{', '.join(labels) or 'Пн–Пт'} · {hours}"
+
+
+def shop_is_live(shop: Business) -> bool:
+    return shop.status == "verified"
+
+
+def program_open(program: LoyaltyProgram) -> bool:
+    return bool(program.is_active) and program.archived_at is None
+
+
+async def program_usable(
+    session: AsyncSession, program: LoyaltyProgram, customer_id: str | None
+) -> bool:
+    if program_open(program):
+        return True
+    if program.archived_at is not None and customer_id:
+        return await progress_for(session, customer_id, program) > 0
+    return False
 
 
 @dataclass
@@ -258,30 +335,30 @@ async def active_program(session: AsyncSession, business_id: str) -> LoyaltyProg
         select(LoyaltyProgram).where(
             LoyaltyProgram.business_id == business_id,
             LoyaltyProgram.is_active.is_(True),
+            LoyaltyProgram.archived_at.is_(None),
         )
     )
 
 
-async def shop_programs(session: AsyncSession, business_id: str) -> list[LoyaltyProgram]:
-    rows = (
-        await session.scalars(
-            select(LoyaltyProgram).where(
-                LoyaltyProgram.business_id == business_id,
-                LoyaltyProgram.is_active.is_(True),
-            )
+async def shop_programs(
+    session: AsyncSession, business_id: str, *, include_archived: bool = False
+) -> list[LoyaltyProgram]:
+    query = select(LoyaltyProgram).where(LoyaltyProgram.business_id == business_id)
+    if not include_archived:
+        query = query.where(
+            LoyaltyProgram.is_active.is_(True), LoyaltyProgram.archived_at.is_(None)
         )
-    ).all()
+    rows = (await session.scalars(query.order_by(LoyaltyProgram.created_at.desc()))).all()
     return list(rows)
 
 
-async def shop_products(session: AsyncSession, business_id: str) -> list[Product]:
-    rows = (
-        await session.scalars(
-            select(Product)
-            .where(Product.business_id == business_id, Product.is_active.is_(True))
-            .order_by(Product.group_name, Product.name)
-        )
-    ).all()
+async def shop_products(
+    session: AsyncSession, business_id: str, *, active_only: bool = True
+) -> list[Product]:
+    query = select(Product).where(Product.business_id == business_id)
+    if active_only:
+        query = query.where(Product.is_active.is_(True))
+    rows = (await session.scalars(query.order_by(Product.group_name, Product.name))).all()
     return list(rows)
 
 
@@ -293,6 +370,7 @@ async def create_shop(
     city: str,
     stamps: int = 7,
     reward: str = "Подарок",
+    verified: bool = False,
 ) -> Business:
     existing = await shop_for_owner(session, owner.max_user_id)
     if existing is not None:
@@ -303,7 +381,10 @@ async def create_shop(
             program.stamps_required = max(2, min(stamps, 12))
             program.reward_title = reward
             program.title = f"{program.stamps_required} визитов — подарок"
-        owner.role = UserRole.BUSINESS.value
+        if verified:
+            existing.status = "verified"
+            existing.verified_at = existing.verified_at or datetime.now(UTC)
+            owner.role = UserRole.BUSINESS.value
         await ensure_owner_staff(session, existing)
         return existing
     shop = Business(
@@ -311,6 +392,8 @@ async def create_shop(
         city=city.strip(),
         category="shop",
         owner_max_user_id=owner.max_user_id,
+        status="verified" if verified else "pending",
+        verified_at=datetime.now(UTC) if verified else None,
     )
     session.add(shop)
     await session.flush()
@@ -323,7 +406,11 @@ async def create_shop(
             reward_title=reward.strip() or "Подарок",
         )
     )
-    owner.role = UserRole.BUSINESS.value
+    if verified:
+        owner.role = UserRole.BUSINESS.value
+    else:
+        if owner.role == UserRole.NONE.value:
+            owner.role = UserRole.CLIENT.value
     await ensure_owner_staff(session, shop)
     return shop
 
@@ -386,10 +473,14 @@ async def client_cards(session: AsyncSession, max_user_id: int) -> list[dict[str
         shop = await session.get(Business, customer.business_id)
         if shop is None:
             continue
-        programs = await shop_programs(session, shop.id)
+        programs = await shop_programs(session, shop.id, include_archived=True)
         promo_rows = []
         for program in programs:
             current = await progress_for(session, customer.id, program)
+            if program.archived_at is not None and current <= 0:
+                continue
+            if not program.is_active and program.archived_at is None and current <= 0:
+                continue
             goal = promo_goal(program)
             redeemed = await reward_redemptions(session, customer.id, program.id)
             available = max(0, current // goal - redeemed)
@@ -406,6 +497,7 @@ async def client_cards(session: AsyncSession, max_user_id: int) -> list[dict[str
                     "ready": ready,
                     "available": available,
                     "bonus_reward": program.reward_bonus,
+                    "archived": program.archived_at is not None,
                 }
             )
         cards.append(
@@ -443,13 +535,19 @@ async def reward_redemptions(session: AsyncSession, customer_id: str, program_id
 
 
 async def shop_directory(session: AsyncSession) -> list[Business]:
-    rows = (await session.scalars(select(Business).order_by(Business.name))).all()
+    rows = (
+        await session.scalars(
+            select(Business)
+            .where(Business.status == "verified")
+            .order_by(Business.name)
+        )
+    ).all()
     return list(rows)
 
 
 async def shop_public(session: AsyncSession, business_id: str) -> dict[str, Any] | None:
     shop = await session.get(Business, business_id)
-    if shop is None:
+    if shop is None or not shop_is_live(shop):
         return None
     products = await shop_products(session, shop.id)
     programs = await shop_programs(session, shop.id)
@@ -614,8 +712,13 @@ async def record_purchase_for_guest(
         if program_id
         else await active_program(session, shop.id)
     )
-    if program and (program.business_id != shop.id or not program.is_active):
+    if program and program.business_id != shop.id:
         return ScanResult(ok=False, message="Акция больше не действует.")
+    if program and not await program_usable(session, program, customer.id):
+        return ScanResult(
+            ok=False,
+            message="Новых гостей акция уже не принимает, но накопленный прогресс сохранён.",
+        )
     items_json = json.dumps(
         [{"name": items.strip() or "Покупка", "qty": max(1, qty), "price": max(0, amount_rub)}],
         ensure_ascii=False,
@@ -722,8 +825,13 @@ async def apply_ticket(session: AsyncSession, *, user: AppUser, ticket: Ticket) 
         if ticket.program_id
         else await active_program(session, shop.id)
     )
-    if program and (program.business_id != shop.id or not program.is_active):
+    if program and program.business_id != shop.id:
         return ScanResult(ok=False, message="Акция больше не действует.")
+    if program and not await program_usable(session, program, customer.id):
+        return ScanResult(
+            ok=False,
+            message="Новых гостей акция уже не принимает, но накопленный прогресс сохранён.",
+        )
     claimed = await session.execute(
         update(Ticket).where(Ticket.id == ticket.id, Ticket.used.is_(False)).values(used=True)
     )
@@ -855,6 +963,33 @@ async def add_product(
     return product
 
 
+async def update_product(
+    session: AsyncSession,
+    shop: Business,
+    product_id: str,
+    *,
+    name: str,
+    group_name: str,
+    price_rub: int,
+    active: bool,
+) -> Product | None:
+    product = await session.get(Product, product_id)
+    if product is None or product.business_id != shop.id:
+        return None
+    product.name = name.strip() or product.name
+    product.group_name = group_name.strip() or "Основное"
+    product.price_rub = max(0, price_rub)
+    product.is_active = active
+    await session.flush()
+    return product
+
+
+async def archive_promo(session: AsyncSession, program: LoyaltyProgram) -> None:
+    program.is_active = False
+    program.archived_at = datetime.now(UTC)
+    await session.flush()
+
+
 async def add_promo(
     session: AsyncSession,
     shop: Business,
@@ -899,11 +1034,15 @@ async def create_staff_invite(
     shop: Business,
     *,
     created_by: int,
-    can_stats: bool,
-    can_earn: bool,
-    can_scan: bool,
-    can_edit: bool,
+    can_stats: bool = False,
+    can_earn: bool = False,
+    can_scan: bool = True,
+    can_edit: bool = False,
+    schedule_days: str = DEFAULT_DAYS,
+    shift_from: str = "10:00",
+    shift_to: str = "22:00",
 ) -> ShopInvite:
+    days, start, end = normalize_schedule(schedule_days, shift_from, shift_to)
     invite = ShopInvite(
         id=secrets.token_hex(8),
         business_id=shop.id,
@@ -912,6 +1051,9 @@ async def create_staff_invite(
         can_earn=can_earn,
         can_scan=can_scan,
         can_edit=can_edit,
+        schedule_days=days,
+        shift_from=start,
+        shift_to=end,
     )
     session.add(invite)
     await session.flush()
@@ -948,6 +1090,10 @@ async def list_shop_staff(session: AsyncSession, shop: Business) -> list[dict[st
                 "can_earn": row.can_earn,
                 "can_scan": row.can_scan,
                 "can_edit": row.can_edit,
+                "schedule_days": row.schedule_days,
+                "shift_from": row.shift_from,
+                "shift_to": row.shift_to,
+                "schedule": schedule_label(row.schedule_days, row.shift_from, row.shift_to),
             }
         )
     people.sort(key=lambda item: (item["kind"] != "owner", item["name"]))
@@ -982,6 +1128,9 @@ async def accept_staff_invite(
                 can_earn=invite.can_earn,
                 can_scan=invite.can_scan,
                 can_edit=invite.can_edit,
+                schedule_days=invite.schedule_days,
+                shift_from=invite.shift_from,
+                shift_to=invite.shift_to,
             )
         )
     else:
@@ -989,20 +1138,43 @@ async def accept_staff_invite(
         existing.can_earn = invite.can_earn
         existing.can_scan = invite.can_scan
         existing.can_edit = invite.can_edit
+        existing.schedule_days = invite.schedule_days
+        existing.shift_from = invite.shift_from
+        existing.shift_to = invite.shift_to
     invite.used_by = user.max_user_id
+    user.role = UserRole.BUSINESS.value
     await session.flush()
-    return True, f"Ты кассир «{shop.name}». Можно показывать QR и считать код гостя."
+    return True, f"Ты кассир «{shop.name}». Можно показывать QR и сканировать код гостя."
 
 
 async def join_promo(
     session: AsyncSession, user: AppUser, program_id: str
 ) -> tuple[bool, str, Business | None]:
     program = await session.get(LoyaltyProgram, program_id)
-    if program is None or not program.is_active:
+    if program is None or not program_open(program):
+        if program is not None and program.archived_at is not None:
+            shop = await session.get(Business, program.business_id)
+            if shop is not None and shop.owner_max_user_id == user.max_user_id:
+                return True, f"Это твоя акция «{program.title}».", shop
+            customer = await session.scalar(
+                select(Customer).where(
+                    Customer.business_id == program.business_id,
+                    Customer.max_user_id == user.max_user_id,
+                )
+            )
+            if (
+                shop is not None
+                and customer is not None
+                and await progress_for(session, customer.id, program) > 0
+            ):
+                return True, f"Твой прогресс по «{program.title}» сохранён.", shop
+            return False, "Акцию сняли, но накопленные визиты гостей не сгорают.", None
         return False, "Акция недоступна или на паузе.", None
     shop = await session.get(Business, program.business_id)
     if shop is None:
         return False, "Точка не найдена.", None
+    if not shop_is_live(shop) and shop.owner_max_user_id != user.max_user_id:
+        return False, "Эта точка ещё не подтверждена.", None
     if shop.owner_max_user_id == user.max_user_id:
         return True, f"Это твоя акция «{program.title}».", shop
     if user.role == UserRole.NONE.value:
@@ -1064,3 +1236,133 @@ async def join_promo_token(
     if program is None or shop is None:
         return False, "Ссылка истекла или недействительна. Попроси новую.", None
     return await join_promo(session, user, program.id)
+
+
+async def geocode_address(query: str) -> dict[str, Any] | None:
+    text = (query or "").strip()
+    if len(text) < 3:
+        return None
+    import httpx
+
+    async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "Kartych/1.0"}) as client:
+        response = await client.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": text, "format": "json", "limit": 1, "addressdetails": 1},
+        )
+        response.raise_for_status()
+        rows = response.json()
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "lat": float(row["lat"]),
+        "lng": float(row["lon"]),
+        "label": str(row.get("display_name") or text),
+    }
+
+
+async def save_shop_location(
+    session: AsyncSession, shop: Business, latitude: float, longitude: float
+) -> None:
+    loc = await session.get(BusinessLocation, shop.id)
+    if loc:
+        loc.latitude, loc.longitude = latitude, longitude
+    else:
+        session.add(BusinessLocation(business_id=shop.id, latitude=latitude, longitude=longitude))
+
+
+async def apply_for_business(
+    session: AsyncSession,
+    owner: AppUser,
+    *,
+    name: str,
+    city: str,
+    address: str,
+    inn: str,
+    director_name: str,
+    website: str,
+    latitude: float | None,
+    longitude: float | None,
+) -> tuple[Business, str]:
+    shop = await shop_for_owner(session, owner.max_user_id)
+    if shop is not None and shop.status == "verified":
+        return shop, "already"
+    if shop is None:
+        shop = await create_shop(session, owner, name=name, city=city, verified=False)
+    shop.name = name.strip() or shop.name
+    shop.city = city.strip()
+    shop.address = address.strip()
+    shop.inn = inn_digits(inn)
+    shop.director_name = director_name.strip()
+    shop.website = website.strip()[:240]
+    shop.status = "pending"
+    shop.verified_at = None
+    if owner.role == UserRole.NONE.value:
+        owner.role = UserRole.CLIENT.value
+    if latitude is not None and longitude is not None:
+        await save_shop_location(session, shop, latitude, longitude)
+    await session.flush()
+    return shop, "pending"
+
+
+async def pending_businesses(session: AsyncSession) -> list[Business]:
+    rows = (
+        await session.scalars(
+            select(Business).where(Business.status == "pending").order_by(Business.created_at.desc())
+        )
+    ).all()
+    return list(rows)
+
+
+async def set_shop_review(
+    session: AsyncSession, shop: Business, *, approved: bool
+) -> AppUser | None:
+    owner = (
+        await session.scalar(select(AppUser).where(AppUser.max_user_id == shop.owner_max_user_id))
+        if shop.owner_max_user_id
+        else None
+    )
+    if approved:
+        shop.status = "verified"
+        shop.verified_at = datetime.now(UTC)
+        if owner is not None:
+            owner.role = UserRole.BUSINESS.value
+            await ensure_owner_staff(session, shop)
+    else:
+        shop.status = "rejected"
+        shop.verified_at = None
+    await session.flush()
+    return owner
+
+
+async def extra_admin_ids(session: AsyncSession) -> set[int]:
+    return set(await session.scalars(select(PlatformAdmin.max_user_id)))
+
+
+async def platform_admin_ids(session: AsyncSession, settings) -> set[int]:
+    return set(settings.admin_ids()) | await extra_admin_ids(session)
+
+
+async def add_platform_admin(
+    session: AsyncSession, max_user_id: int, *, added_by: int, pinned: set[int]
+) -> tuple[bool, str]:
+    if max_user_id <= 0:
+        return False, "Нужен MAX id — положительное число из профиля MAX."
+    if max_user_id in pinned or await session.get(PlatformAdmin, max_user_id) is not None:
+        return False, "Этот человек уже админ."
+    session.add(PlatformAdmin(max_user_id=max_user_id, added_by=added_by))
+    await session.flush()
+    return True, "Админ добавлен. Он увидит заявки после входа через MAX."
+
+
+async def remove_platform_admin(
+    session: AsyncSession, max_user_id: int, *, pinned: set[int]
+) -> tuple[bool, str]:
+    if max_user_id in pinned:
+        return False, "Этого админа задали в настройках сервера. Его нельзя снять здесь."
+    row = await session.get(PlatformAdmin, max_user_id)
+    if row is None:
+        return False, "Такого админа нет в списке."
+    await session.delete(row)
+    await session.flush()
+    return True, "Админ снят."

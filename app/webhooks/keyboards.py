@@ -37,11 +37,15 @@ def home_keyboard(
     bot_username: str = "",
     bot_user_id: int | None = None,
     miniapp_url: str = "",
+    business: bool = False,
 ) -> list[dict[str, Any]]:
     rows = [
-        [callback_button("Считать QR", "scan")],
-        [callback_button("Открыть приложение", "openapp")],
+        [callback_button("Показать QR", "showqr")],
     ]
+    if business:
+        rows.append([callback_button("Сканировать QR", "scan")])
+    rows.append([callback_button("Открыть кабинет", "openapp")])
+    rows.append([callback_button("Поддержка", "help")])
     return [inline_keyboard(rows)]
 
 
@@ -78,11 +82,18 @@ def client_keyboard(client: Any | None = None, bot: dict[str, Any] | None = None
     if bot:
         username = username or str(bot.get("username") or "")
         bot_user_id = bot.get("user_id")
-    return home_keyboard(bot_username=username, bot_user_id=bot_user_id)
+    return home_keyboard(bot_username=username, bot_user_id=bot_user_id, business=False)
 
 
 def business_keyboard(client: Any | None = None, bot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    return client_keyboard(client, bot)
+    username = ""
+    bot_user_id = None
+    if client is not None:
+        username = client.settings.max_bot_username
+    if bot:
+        username = username or str(bot.get("username") or "")
+        bot_user_id = bot.get("user_id")
+    return home_keyboard(bot_username=username, bot_user_id=bot_user_id, business=True)
 
 
 def shop_pick_keyboard(shops: list[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -96,9 +107,11 @@ def welcome_attachments(
     bot_username: str = "",
     bot_user_id: int | None = None,
     miniapp_url: str = "",
+    business: bool = False,
 ) -> list[dict[str, Any]]:
     return home_keyboard(
         bot_username=bot_username,
         bot_user_id=bot_user_id,
         miniapp_url=miniapp_url,
+        business=business,
     )

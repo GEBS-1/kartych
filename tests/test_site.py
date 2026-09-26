@@ -56,6 +56,8 @@ def test_public_site(client) -> None:
     assert 'href="/login"' in home.text
     assert "В кабинет" in home.text
     assert "site-top-go" in home.text
+    assert "theme-toggle" in home.text
+    assert "Как это работает" in home.text
     assert "Кто ты" not in home.text
     login = client.post("/login/demo", data={"role": "client"}, follow_redirects=True)
     assert login.status_code == 200
@@ -131,19 +133,46 @@ def test_guest_and_business_bars(client) -> None:
     assert 'href="/me/qr"' in guest.text
     assert 'id="scan-btn"' not in guest.text
     assert "cup-bar" in guest.text
-    assert "cup-bar-top" in guest.text
+    assert "cup-bar-top" not in guest.text
+    assert "Поиск карт" in guest.text or "Найти карту" in guest.text
     assert "В кабинет" in guest.text
     client.post("/login/demo", data={"role": "business"})
     biz = client.get("/biz")
     assert "Аналитика" in biz.text
-    assert "Игры" in biz.text
+    assert "Сотрудники" in biz.text
+    assert "Игры" not in biz.text or 'href="/biz/games"' not in biz.text
     assert 'href="/biz/earn"' in biz.text
+    assert 'href="/biz/scan"' in biz.text
+    assert 'id="scan-btn"' in biz.text
+    assert "Гостей" in biz.text
+    assert "Средний чек" in biz.text
     assert 'action="/biz/earn"' in client.get("/biz/earn").text
     contests = client.get("/biz/contests")
     assert "По покупкам" in contests.text
     assert "Бонусы" in contests.text
     assert "Новая ссылка" in contests.text
     assert "/biz/promos/" in contests.text
+    assert "Удалить акцию" in contests.text
+    assert "Игры и задания" in contests.text
+    staff = client.get("/biz/staff")
+    assert staff.status_code == 200
+    assert "Пригласить кассира" in staff.text
+
+
+def test_owner_switches_to_guest_cabinet(client) -> None:
+    client.post("/login/demo", data={"role": "business"})
+    biz = client.get("/biz")
+    assert "Как гость" in biz.text
+    guest = client.get("/as/guest", follow_redirects=True)
+    assert guest.status_code == 200
+    assert "Мои карты" in guest.text
+    assert "К точке" in guest.text
+    assert 'href="/me/qr"' in guest.text
+    assert "Аналитика" not in guest.text.split("cup-bar", 1)[-1]
+    back = client.get("/as/biz", follow_redirects=True)
+    assert back.status_code == 200
+    assert "Аналитика" in back.text
+    assert "Как гость" in back.text
 
 
 def test_earn_and_redeem_qr(client) -> None:
@@ -163,3 +192,113 @@ def test_earn_and_redeem_qr(client) -> None:
     assert body["ok"] is True
     me = client.get("/me")
     assert "Моя точка" in me.text
+
+
+def test_business_apply_waits_for_admin(client, app) -> None:
+    from tests.test_session import signed_launch
+
+    client.post("/login/demo", data={"role": "client"})
+    page = client.get("/biz/apply")
+    assert page.status_code == 200
+    assert "Открыть точку" in page.text
+    sent = client.post(
+        "/biz/apply",
+        data={
+            "name": "Новая кофейня",
+            "city": "Казань",
+            "address": "Баумана, 1",
+            "website": "https://coffee.test",
+            "inn": "7707083893",
+            "director_name": "Иванов Иван Иванович",
+            "latitude": "55.7963",
+            "longitude": "49.1088",
+        },
+        follow_redirects=True,
+    )
+    assert sent.status_code == 200
+    assert "проверке" in sent.text.lower() or "отправили" in sent.text.lower()
+    assert "Новая кофейня" not in client.get("/me/shops").text
+    denied = client.get("/biz", follow_redirects=False)
+    assert denied.status_code == 303
+    assert denied.headers["location"] == "/biz/apply"
+    guest = signed_launch(app.state.settings.max_bot_token, user='{"id": 99001, "first_name": "Админ"}')
+    assert client.post("/app/auth", json={"init_data": guest}).status_code == 200
+    admin = client.get("/admin")
+    assert admin.status_code == 200
+    assert "Новая кофейня" in admin.text
+    shop_id = admin.text.split("/admin/", 1)[1].split("/review", 1)[0]
+    approved = client.post(f"/admin/{shop_id}/review", data={"action": "approve"}, follow_redirects=True)
+    assert approved.status_code == 200
+    client.post("/login/demo", data={"role": "client"})
+    cabinet = client.get("/biz")
+    assert cabinet.status_code == 200
+    assert "Аналитика" in cabinet.text
+    assert "Новая кофейня" in client.get("/me/shops").text
+    assert "Переключить кабинет" not in client.get("/settings").text
+
+
+def test_admin_can_add_another_admin(client, app) -> None:
+    from tests.test_session import signed_launch
+
+    first = signed_launch(app.state.settings.max_bot_token, user='{"id": 99001, "first_name": "Админ"}')
+    assert client.post("/app/auth", json={"init_data": first}).status_code == 200
+    page = client.get("/admin")
+    assert page.status_code == 200
+    assert "Кто подтверждает" in page.text
+    assert "99001" in page.text
+    added = client.post("/admin/admins", data={"max_user_id": 99002}, follow_redirects=True)
+    assert added.status_code == 200
+    assert "добавлен" in added.text.lower()
+    pinned = client.post("/admin/admins/99001/remove", follow_redirects=True)
+    assert "настройках сервера" in pinned.text
+    second = signed_launch(app.state.settings.max_bot_token, user='{"id": 99002, "first_name": "Второй"}')
+    assert client.post("/app/auth", json={"init_data": second}).status_code == 200
+    assert client.get("/admin").status_code == 200
+    client.post("/app/auth", json={"init_data": first})
+    removed = client.post("/admin/admins/99002/remove", follow_redirects=True)
+    assert "снят" in removed.text.lower()
+    client.post("/app/auth", json={"init_data": second})
+    denied = client.get("/admin", follow_redirects=False)
+    assert denied.status_code == 303
+    assert denied.headers["location"] == "/me"
+
+
+def test_delete_promo_keeps_guest_progress(client) -> None:
+    client.post("/login/demo", data={"role": "business"})
+    page = client.get("/biz/promos")
+    program_id = page.text.split("/biz/promos/", 1)[1].split("/", 1)[0]
+    made = client.post(
+        "/biz/earn",
+        data={"program_id": program_id, "items": "Кофе", "qty": 1, "amount_rub": 180, "place": "Касса"},
+    )
+    payload = made.text.split('data-code="', 1)[1].split('"', 1)[0]
+    client.post("/login/demo", data={"role": "client"})
+    assert client.post("/app/scan", json={"code": payload}).json()["ok"] is True
+    me = client.get("/me")
+    assert "Моя точка" in me.text
+    client.post("/login/demo", data={"role": "business"})
+    deleted = client.post(f"/biz/promos/{program_id}/delete", follow_redirects=True)
+    assert deleted.status_code == 200
+    assert "Прогресс гостей сохранён" in deleted.text or "Снята" in deleted.text
+    client.post("/login/demo", data={"role": "client"})
+    card = client.get("/me")
+    assert "Моя точка" in card.text
+    assert "до подарка" in card.text
+
+
+def test_verify_business_inn(client) -> None:
+    client.post("/login/demo", data={"role": "business"})
+    saved = client.post(
+        "/biz/setup",
+        data={
+            "name": "Моя точка",
+            "city": "Москва",
+            "address": "Ленина, 1",
+            "inn": "7707083893",
+            "director_name": "Иванов Иван Иванович",
+        },
+        follow_redirects=True,
+    )
+    assert saved.status_code == 200
+    assert "7707083893" in saved.text
+    assert "Иванов Иван Иванович" in saved.text

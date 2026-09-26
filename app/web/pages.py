@@ -20,16 +20,21 @@ from app.db.models import (
     ChallengeClaim,
     Customer,
     LoyaltyProgram,
+    Product,
     ShopStaff,
     UserRole,
 )
-from app.web.auth import read_session, set_session, verify_init_data
+from app.web.auth import TTL, read_session, set_session, verify_init_data
 from app.web.insights import activity, analytics, games, league, utc
 from app.web.loyalty import (
+    WEEKDAYS,
     accept_staff_invite,
+    add_platform_admin,
     add_product,
     add_promo,
+    apply_for_business,
     apply_scan,
+    archive_promo,
     business_people,
     can_scan_for_shop,
     client_cards,
@@ -39,26 +44,39 @@ from app.web.loyalty import (
     create_shop,
     create_staff_invite,
     ensure_customer,
+    extra_admin_ids,
+    geocode_address,
     guest_payload,
     get_or_create_user,
+    inn_digits,
     join_promo_token,
     list_shop_staff,
     live_qr_payload,
+    normalize_schedule,
     parse_promo_start,
     parse_staff_start,
+    pending_businesses,
     pending_invites,
+    program_open,
+    platform_admin_ids,
     promo_rule,
     recent_promo_links,
     record_purchase_for_guest,
+    remove_platform_admin,
     resolve_promo_link,
+    save_shop_location,
+    schedule_label,
+    set_shop_review,
     shop_directory,
     shop_for_member,
     shop_for_owner,
     shop_history,
+    shop_is_live,
     shop_products,
     shop_programs,
     shop_public,
     ticket_payload,
+    update_product,
 )
 from app.web.max_login import tickets
 
@@ -79,22 +97,40 @@ class CurrentUser:
     can_earn: bool = False
     can_scan: bool = False
     can_edit: bool = False
+    owns_shop: bool = False
+    is_cashier: bool = False
+    is_admin: bool = False
+    shop_status: str = ""
+    schedule: str = ""
+    guest_mode: bool = False
 
     @property
     def in_business(self) -> bool:
         return self.is_owner or bool(self.shop_id)
 
     @property
+    def pending_shop(self) -> bool:
+        return self.owns_shop and self.shop_status == "pending"
+
+    @property
+    def guest_view(self) -> bool:
+        return (not self.in_business) or self.guest_mode
+
+    @property
     def cabinet_path(self) -> str:
-        if not self.in_business:
+        if self.guest_view:
             return "/me"
-        if self.can_stats:
+        if self.is_owner:
             return "/biz"
-        if self.can_scan:
-            return "/biz/scan"
-        if self.can_earn:
-            return "/biz/earn"
-        return "/settings"
+        if self.is_cashier:
+            if self.can_stats:
+                return "/biz"
+            if self.can_scan:
+                return "/biz/scan"
+            if self.can_earn:
+                return "/biz/earn"
+            return "/me"
+        return "/me"
 
 
 def _pretty_name(name: str) -> str:
@@ -121,21 +157,28 @@ async def _user(request: Request) -> CurrentUser | None:
             return None
         staff = await session.scalar(select(ShopStaff).where(ShopStaff.max_user_id == uid))
         owned = await shop_for_owner(session, uid)
-        is_owner = owned is not None or row.role == UserRole.BUSINESS.value
-        if is_owner:
+        is_owner = False
+        shop_id = None
+        can_stats = can_earn = can_scan = can_edit = False
+        is_cashier = False
+        schedule = ""
+        shop_status = owned.status if owned is not None else ""
+        if owned is not None and shop_is_live(owned):
+            is_owner = True
             can_stats = can_earn = can_scan = can_edit = True
-            shop_id = owned.id if owned else None
-        elif staff is not None:
-            can_stats, can_earn, can_scan, can_edit = (
-                staff.can_stats,
-                staff.can_earn,
-                staff.can_scan,
-                staff.can_edit,
-            )
-            shop_id = staff.business_id
-        else:
-            can_stats = can_earn = can_scan = can_edit = False
-            shop_id = None
+            shop_id = owned.id
+        elif staff is not None and staff.kind != "owner":
+            staff_shop = await session.get(Business, staff.business_id)
+            if staff_shop is not None and shop_is_live(staff_shop):
+                is_cashier = True
+                can_stats, can_earn, can_scan, can_edit = (
+                    staff.can_stats,
+                    staff.can_earn,
+                    staff.can_scan,
+                    staff.can_edit,
+                )
+                shop_id = staff.business_id
+                schedule = schedule_label(staff.schedule_days, staff.shift_from, staff.shift_to)
         return CurrentUser(
             max_user_id=row.max_user_id,
             display_name=row.display_name,
@@ -148,6 +191,12 @@ async def _user(request: Request) -> CurrentUser | None:
             can_earn=can_earn,
             can_scan=can_scan,
             can_edit=can_edit,
+            owns_shop=owned is not None,
+            is_cashier=is_cashier,
+            is_admin=uid in await platform_admin_ids(session, request.app.state.settings),
+            shop_status=shop_status,
+            schedule=schedule,
+            guest_mode=_guest_mode(request, is_owner=is_owner, is_cashier=is_cashier),
         )
 
 
@@ -171,8 +220,73 @@ def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
     return data
 
 
+def _guest_mode(request: Request, *, is_owner: bool, is_cashier: bool) -> bool:
+    if not (is_owner or is_cashier):
+        return False
+    path = request.url.path
+    if path.startswith("/me"):
+        return True
+    if path.startswith("/biz") or path.startswith("/admin"):
+        return False
+    view = request.query_params.get("view") or request.cookies.get("cup_cabinet", "")
+    return view == "guest"
+
+
+def _biz_home(user: CurrentUser) -> str:
+    if user.is_owner or user.can_stats:
+        return "/biz"
+    if user.can_scan:
+        return "/biz/scan"
+    if user.can_earn:
+        return "/biz/earn"
+    return "/me"
+
+
+def _set_cabinet(response: Response, request: Request, value: str) -> None:
+    settings = request.app.state.settings
+    secure = settings.is_production or request.url.scheme == "https"
+    response.set_cookie(
+        "cup_cabinet",
+        value,
+        httponly=True,
+        secure=secure,
+        samesite="none" if secure else "lax",
+        max_age=TTL,
+        path="/",
+    )
+
+
 def _flag(value: str | None) -> bool:
     return str(value or "").lower() in {"1", "on", "true", "yes"}
+
+
+def _coords(latitude: str, longitude: str) -> tuple[float, float] | None:
+    lat_raw, lng_raw = latitude.strip(), longitude.strip()
+    if not lat_raw and not lng_raw:
+        return None
+    try:
+        lat, lng = float(lat_raw), float(lng_raw)
+    except ValueError:
+        raise HTTPException(422, "Проверьте координаты")
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        raise HTTPException(422, "Проверьте координаты")
+    return lat, lng
+
+
+async def _notify_admins(request: Request, text: str) -> None:
+    client = getattr(request.app.state, "max_client", None)
+    factory = getattr(request.app.state, "session_factory", None)
+    if client is None:
+        return
+    ids = set(request.app.state.settings.admin_ids())
+    if factory is not None:
+        async with factory() as session:
+            ids |= await extra_admin_ids(session)
+    for uid in ids:
+        try:
+            await client.send_message(text=text, user_id=uid)
+        except Exception:
+            continue
 
 
 def _denied(
@@ -184,8 +298,12 @@ def _denied(
     if user is None:
         return RedirectResponse("/login", status_code=303)
     if owner_only and not user.is_owner:
+        if user.pending_shop:
+            return RedirectResponse("/biz/apply", status_code=303)
         return RedirectResponse("/settings", status_code=303)
     if not user.in_business:
+        if user.pending_shop:
+            return RedirectResponse("/biz/apply", status_code=303)
         return RedirectResponse("/me", status_code=303)
     allowed = {
         "stats": user.can_stats,
@@ -263,12 +381,12 @@ async def miniapp_auth(request: Request) -> JSONResponse:
 
     async with factory() as session:
         user = await get_or_create_user(session, max_user_id, name or "Гость", username)
-        if demo == "client" and user.role == UserRole.NONE.value:
-            user.role = UserRole.CLIENT.value
         if demo == "business" and user.role == UserRole.NONE.value:
             user.role = UserRole.BUSINESS.value
             if await shop_for_owner(session, user.max_user_id) is None:
-                await create_shop(session, user, name="Моя точка", city="Москва")
+                await create_shop(session, user, name="Моя точка", city="Москва", verified=True)
+        elif user.role == UserRole.NONE.value:
+            user.role = UserRole.CLIENT.value
         start_param = (parsed.get("start_param") or "") if parsed is not None else ""
         token = parse_staff_start(start_param)
         if token:
@@ -303,7 +421,18 @@ async def cabinet(request: Request) -> HTMLResponse:
     if user is None:
         return templates.TemplateResponse(request, "partials/gate.html", _ctx(request))
     if user.role in {UserRole.NONE.value, ""}:
-        return templates.TemplateResponse(request, "partials/role.html", _ctx(request, user=user))
+        factory = request.app.state.session_factory
+        async with factory() as session:
+            db_user = await session.scalar(
+                select(AppUser).where(AppUser.max_user_id == user.max_user_id)
+            )
+            if db_user is not None:
+                db_user.role = UserRole.CLIENT.value
+                await session.commit()
+                user.role = UserRole.CLIENT.value
+        return templates.TemplateResponse(
+            request, "partials/cabinet.html", _ctx(request, user=user, tab="client")
+        )
     tab = request.query_params.get("tab") or (
         "business" if user.role == UserRole.BUSINESS.value else "client"
     )
@@ -433,8 +562,8 @@ async def business_qr(request: Request) -> HTMLResponse:
     factory = request.app.state.session_factory
     async with factory() as session:
         shop = await shop_for_member(session, user.max_user_id)
-    if shop is None:
-        return HTMLResponse("<p class='muted'>Сначала создай точку.</p>")
+    if shop is None or not shop_is_live(shop):
+        return HTMLResponse("<p class='muted'>Сначала подтвердим точку.</p>")
     payload = live_qr_payload(request.app.state.settings.webhook_secret, shop.id)
     return templates.TemplateResponse(
         request,
@@ -562,10 +691,7 @@ async def shop_page(request: Request, shop_id: str) -> HTMLResponse:
 
 @router.get("/help")
 async def help_page(request: Request) -> RedirectResponse:
-    user = await _user(request)
-    if user is None:
-        return RedirectResponse("/login", status_code=303)
-    return RedirectResponse("/settings", status_code=303)
+    return RedirectResponse("/", status_code=303)
 
 
 @router.get("/login")
@@ -580,9 +706,6 @@ async def login_page(request: Request):
     error = ""
     if request.query_params.get("err") == "expired":
         error = "Сессия входа истекла. Нажми «Войти через MAX» ещё раз."
-    role = request.query_params.get("role") or "client"
-    if invite or promo:
-        role = "client"
     return templates.TemplateResponse(
         request,
         "login.html",
@@ -593,7 +716,6 @@ async def login_page(request: Request):
             error=error,
             wait_token="",
             max_url="",
-            role=role,
             invite=invite,
             promo=promo,
         ),
@@ -603,19 +725,15 @@ async def login_page(request: Request):
 @router.post("/login")
 async def login_max(
     request: Request,
-    role: str = Form("client"),
     invite: str = Form(""),
     promo: str = Form(""),
 ):
     user = await _user(request)
     if user is not None:
         return RedirectResponse(user.cabinet_path, status_code=303)
-    body_role = role if role in {"client", "business"} else "client"
     token_invite = invite.strip() if len(invite.strip()) == 16 else ""
     token_promo = promo.strip() if len(promo.strip()) == 16 else ""
-    if token_invite or token_promo:
-        body_role = "client"
-    token = tickets.create(role=body_role, invite=token_invite, promo=token_promo)
+    token = tickets.create(role="client", invite=token_invite, promo=token_promo)
     bot = request.app.state.settings.max_bot_username or "t136_hakaton_max_bot"
     max_url = f"https://max.ru/{bot}?start={tickets.payload(token)}"
     return templates.TemplateResponse(
@@ -628,7 +746,6 @@ async def login_max(
             error="",
             wait_token=token,
             max_url=max_url,
-            role=body_role,
             invite=token_invite,
             promo=token_promo,
         ),
@@ -647,18 +764,17 @@ async def login_complete(request: Request, token: str) -> RedirectResponse:
         return RedirectResponse("/login?err=expired", status_code=303)
     settings = request.app.state.settings
     factory = request.app.state.session_factory
-    role = item["role"]
     invite = str(item.get("invite") or "")
     promo = str(item.get("promo") or "")
-    path = "/biz" if role == "business" else "/me"
+    path = "/me"
     async with factory() as session:
         user = await session.scalar(
             select(AppUser).where(AppUser.max_user_id == int(item["user_id"]))
         )
         if user is None:
             user = await get_or_create_user(session, int(item["user_id"]), "Гость MAX", None)
-        if role in {"client", "business"} and not invite and not promo:
-            user.role = role
+        if user.role == UserRole.NONE.value:
+            user.role = UserRole.CLIENT.value
         if invite:
             ok, _msg = await accept_staff_invite(session, user, invite)
             if ok:
@@ -699,7 +815,7 @@ async def _sign_in(
             and username in {"demo_shop"}
             and await shop_for_owner(session, user.max_user_id) is None
         ):
-            await create_shop(session, user, name="Моя точка", city="Москва")
+            await create_shop(session, user, name="Моя точка", city="Москва", verified=True)
         await session.commit()
     response = RedirectResponse("/biz" if role == "business" else "/me", status_code=303)
     set_session(
@@ -750,6 +866,16 @@ async def settings_page(request: Request) -> HTMLResponse:
         ranking = await league(session, user.max_user_id)
         staff_rows = await list_shop_staff(session, shop) if shop and user.is_owner else []
         invites = await pending_invites(session, shop) if shop and user.is_owner else []
+        products = (
+            await shop_products(session, shop.id, active_only=False)
+            if shop and user.can_edit
+            else []
+        )
+        staff_self = None
+        if shop and user.is_cashier:
+            staff_self = await session.scalar(
+                select(ShopStaff).where(ShopStaff.max_user_id == user.max_user_id)
+            )
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -765,28 +891,246 @@ async def settings_page(request: Request) -> HTMLResponse:
             ranking=ranking,
             staff_rows=staff_rows,
             invites=invites,
+            products=products,
+            staff_self=staff_self,
+            weekdays=WEEKDAYS,
             invite_site=f"{base}/join",
             invite_max=f"https://max.ru/{bot}?start=",
             tab="settings",
+            apply_url="/biz/apply",
         ),
     )
 
 
 @router.post("/settings")
-async def settings_save(request: Request, role: str = Form("client")) -> RedirectResponse:
+async def settings_save(request: Request) -> RedirectResponse:
     user = await _user(request)
     if user is None:
         return RedirectResponse("/login", status_code=303)
-    body_role = role if role in {"client", "business"} else "client"
+    return RedirectResponse("/settings", status_code=303)
+
+
+@router.get("/as/guest")
+async def as_guest(request: Request) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    response = RedirectResponse("/me", status_code=303)
+    _set_cabinet(response, request, "guest")
+    return response
+
+
+@router.get("/as/biz")
+async def as_biz(request: Request) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.in_business:
+        return RedirectResponse("/biz/apply" if user.owns_shop else "/me", status_code=303)
+    response = RedirectResponse(_biz_home(user), status_code=303)
+    _set_cabinet(response, request, "biz")
+    return response
+
+
+@router.get("/biz/apply", response_class=HTMLResponse)
+async def biz_apply_page(request: Request) -> HTMLResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if user.is_owner:
+        return RedirectResponse("/biz", status_code=303)
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        shop = await shop_for_owner(session, user.max_user_id)
+        location = await session.get(BusinessLocation, shop.id) if shop else None
+    return templates.TemplateResponse(
+        request,
+        "biz_apply.html",
+        _ctx(
+            request,
+            user=user,
+            title="Открыть точку",
+            shop=shop,
+            location=location,
+            tab="settings",
+        ),
+    )
+
+
+@router.post("/biz/geocode")
+async def biz_geocode(request: Request) -> JSONResponse:
+    user = await _user(request)
+    if user is None:
+        return JSONResponse({"ok": False, "message": "Сначала войди"}, status_code=401)
+    body = await request.json()
+    found = await geocode_address(str(body.get("q") or ""))
+    if found is None:
+        return JSONResponse({"ok": False, "message": "Адрес не найден. Укажи точку на карте."})
+    return JSONResponse({"ok": True, **found})
+
+
+@router.post("/biz/apply")
+async def biz_apply_post(
+    request: Request,
+    name: str = Form(..., min_length=1, max_length=160),
+    city: str = Form("", max_length=160),
+    address: str = Form("", max_length=200),
+    website: str = Form("", max_length=240),
+    inn: str = Form(""),
+    director_name: str = Form(""),
+    latitude: str = Form(""),
+    longitude: str = Form(""),
+) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if user.is_owner:
+        return RedirectResponse("/biz", status_code=303)
+    coords = _coords(latitude, longitude)
+    if coords is None and address.strip():
+        found = await geocode_address(" ".join(part for part in [city, address, name] if part.strip()))
+        if found is not None:
+            coords = (found["lat"], found["lng"])
     factory = request.app.state.session_factory
     async with factory() as session:
         db_user = await session.scalar(
             select(AppUser).where(AppUser.max_user_id == user.max_user_id)
         )
-        if db_user is not None:
-            db_user.role = body_role
-            await session.commit()
-    return RedirectResponse("/biz" if body_role == "business" else "/me", status_code=303)
+        if db_user is None:
+            return RedirectResponse("/login", status_code=303)
+        shop, state = await apply_for_business(
+            session,
+            db_user,
+            name=name,
+            city=city,
+            address=address,
+            inn=inn,
+            director_name=director_name,
+            website=website,
+            latitude=None if coords is None else coords[0],
+            longitude=None if coords is None else coords[1],
+        )
+        await session.commit()
+    if state == "already":
+        return RedirectResponse("/biz", status_code=303)
+    await _notify_admins(
+        request,
+        "Новая заявка на точку в Картыч.\n"
+        f"«{shop.name}» · {shop.city} {shop.address}\n"
+        f"Сайт: {shop.website or 'нет'}\n"
+        f"ИНН: {shop.inn or 'нет'} · {shop.director_name or 'без ФИО'}\n"
+        f"Проверить: {_public_base(request)}/admin",
+    )
+    return RedirectResponse(
+        "/biz/apply?flash=" + quote("Заявку отправили. Когда подтвердим точку — откроется кабинет бизнеса."),
+        status_code=303,
+    )
+
+
+@router.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request) -> HTMLResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/me", status_code=303)
+    factory = request.app.state.session_factory
+    pinned = request.app.state.settings.admin_ids()
+    async with factory() as session:
+        pending = await pending_businesses(session)
+        locations = {
+            loc.business_id: loc
+            for loc in (await session.scalars(select(BusinessLocation))).all()
+        }
+        extra = await extra_admin_ids(session)
+        admins = []
+        for uid in sorted(pinned | extra):
+            person = await session.scalar(select(AppUser).where(AppUser.max_user_id == uid))
+            admins.append(
+                {
+                    "id": uid,
+                    "name": (person.display_name if person else "") or f"MAX {uid}",
+                    "pinned": uid in pinned,
+                }
+            )
+    return templates.TemplateResponse(
+        request,
+        "admin.html",
+        _ctx(
+            request,
+            user=user,
+            title="Заявки бизнеса",
+            pending=pending,
+            locations=locations,
+            admins=admins,
+            tab="settings",
+        ),
+    )
+
+
+@router.post("/admin/admins")
+async def admin_add(request: Request, max_user_id: int = Form(...)) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/me", status_code=303)
+    factory = request.app.state.session_factory
+    pinned = request.app.state.settings.admin_ids()
+    async with factory() as session:
+        ok, message = await add_platform_admin(
+            session, max_user_id, added_by=user.max_user_id, pinned=pinned
+        )
+        await session.commit()
+    return RedirectResponse("/admin?flash=" + quote(message), status_code=303)
+
+
+@router.post("/admin/admins/{max_user_id}/remove")
+async def admin_remove(request: Request, max_user_id: int) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/me", status_code=303)
+    factory = request.app.state.session_factory
+    pinned = request.app.state.settings.admin_ids()
+    async with factory() as session:
+        ok, message = await remove_platform_admin(session, max_user_id, pinned=pinned)
+        await session.commit()
+    return RedirectResponse("/admin?flash=" + quote(message), status_code=303)
+
+
+@router.post("/admin/{shop_id}/review")
+async def admin_review(
+    request: Request, shop_id: str, action: str = Form(...)
+) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/me", status_code=303)
+    approved = action == "approve"
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        shop = await session.get(Business, shop_id)
+        if shop is None:
+            return RedirectResponse("/admin", status_code=303)
+        owner = await set_shop_review(session, shop, approved=approved)
+        await session.commit()
+        name = shop.name
+        owner_id = owner.max_user_id if owner is not None else None
+    note = (
+        f"Точку «{name}» подтвердили. Кабинет бизнеса открыт."
+        if approved
+        else f"Заявку «{name}» отклонили. Можно отправить новую с сайта."
+    )
+    client = getattr(request.app.state, "max_client", None)
+    if client is not None and owner_id is not None:
+        try:
+            await client.send_message(text=note, user_id=owner_id)
+        except Exception:
+            pass
+    return RedirectResponse("/admin?flash=" + quote(note), status_code=303)
 
 
 @router.get("/me", response_class=HTMLResponse)
@@ -825,6 +1169,8 @@ async def me_shops_page(request: Request) -> HTMLResponse:
             {
                 "id": s.id,
                 "name": s.name,
+                "city": s.city,
+                "address": s.address,
                 "lat": locations[s.id]["lat"],
                 "lng": locations[s.id]["lng"],
             }
@@ -860,6 +1206,11 @@ async def join_shop(request: Request, shop_id: str) -> RedirectResponse:
             select(AppUser).where(AppUser.max_user_id == user.max_user_id)
         )
         if shop is not None and db_user is not None:
+            if not shop_is_live(shop):
+                return RedirectResponse(
+                    "/me/shops?flash=" + quote("Эта точка ещё не подтверждена"),
+                    status_code=303,
+                )
             if db_user.role == UserRole.NONE.value:
                 db_user.role = UserRole.CLIENT.value
             await ensure_customer(session, shop, db_user)
@@ -1038,6 +1389,7 @@ async def biz_contests_page(request: Request) -> HTMLResponse:
             else []
         )
         links = await recent_promo_links(session, shop) if shop else {}
+        challenges = await games(session, user.max_user_id, shop.id) if shop else []
     return templates.TemplateResponse(
         request,
         "biz_contests.html",
@@ -1047,6 +1399,7 @@ async def biz_contests_page(request: Request) -> HTMLResponse:
             title="Акции",
             shop=shop,
             programs=programs,
+            challenges=challenges,
             promo_links=links,
             promo_site=f"{_public_base(request)}/promo",
             promo_max=(
@@ -1081,8 +1434,11 @@ async def biz_setup(
     name: str = Form(..., min_length=1, max_length=160),
     city: str = Form("", max_length=160),
     address: str = Form("", max_length=200),
+    website: str = Form("", max_length=240),
     latitude: str = Form(""),
     longitude: str = Form(""),
+    inn: str = Form(""),
+    director_name: str = Form(""),
 ) -> RedirectResponse:
     user = await _user(request)
     denied = _denied(user, owner_only=True)
@@ -1096,24 +1452,20 @@ async def biz_setup(
         if db_user is not None:
             shop = await shop_for_member(session, user.max_user_id)
             if shop is None:
-                shop = await create_shop(session, db_user, name=name, city=city)
+                return RedirectResponse("/biz/apply", status_code=303)
             shop.name, shop.city, shop.address = name.strip(), city.strip(), address.strip()
             if not shop.name:
                 raise HTTPException(422, "Укажите название точки")
-            loc = await session.get(BusinessLocation, shop.id)
-            if latitude or longitude:
-                try:
-                    lat, lng = float(latitude), float(longitude)
-                    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
-                        raise ValueError
-                except ValueError:
-                    raise HTTPException(422, "Проверьте координаты")
+            shop.inn = inn_digits(inn)
+            shop.director_name = director_name.strip()
+            shop.website = website.strip()[:240]
+            coords = _coords(latitude, longitude)
+            if coords is not None:
+                await save_shop_location(session, shop, coords[0], coords[1])
+            else:
+                loc = await session.get(BusinessLocation, shop.id)
                 if loc:
-                    loc.latitude, loc.longitude = lat, lng
-                else:
-                    session.add(BusinessLocation(business_id=shop.id, latitude=lat, longitude=lng))
-            elif loc:
-                await session.delete(loc)
+                    await session.delete(loc)
             await session.commit()
     return RedirectResponse("/settings", status_code=303)
 
@@ -1136,6 +1488,39 @@ async def biz_product(
             await add_product(session, shop, name=name, group_name=group_name, price_rub=price_rub)
             await session.commit()
     return RedirectResponse("/settings?flash=" + quote("Товар добавлен"), status_code=303)
+
+
+@router.post("/biz/product/{product_id}")
+async def biz_product_update(
+    request: Request,
+    product_id: str,
+    name: str = Form(..., min_length=1, max_length=160),
+    group_name: str = Form("Основное", max_length=80),
+    price_rub: int = Form(0, ge=0, le=1000000),
+    action: str = Form("save"),
+) -> RedirectResponse:
+    user = await _user(request)
+    denied = _denied(user, "edit")
+    if denied:
+        return denied
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        shop = await shop_for_member(session, user.max_user_id)
+        if shop is not None:
+            product = await session.get(Product, product_id)
+            if product is not None and product.business_id == shop.id:
+                await update_product(
+                    session,
+                    shop,
+                    product_id,
+                    name=name,
+                    group_name=group_name,
+                    price_rub=price_rub,
+                    active=(not product.is_active) if action == "hide" else True,
+                )
+                await session.commit()
+    note = "Товар скрыт" if action == "hide" else "Меню обновлено"
+    return RedirectResponse("/settings?flash=" + quote(note), status_code=303)
 
 
 @router.post("/biz/promo")
@@ -1214,7 +1599,7 @@ async def biz_earn_make(
             return RedirectResponse("/biz", status_code=303)
         if program_id:
             program = await session.get(LoyaltyProgram, program_id)
-            if program is None or program.business_id != shop.id or not program.is_active:
+            if program is None or program.business_id != shop.id or not program_open(program):
                 raise HTTPException(422, "Выберите активную акцию своей точки")
         ticket = await create_earn_ticket(
             session,
@@ -1308,11 +1693,15 @@ async def invite_staff(
     can_earn: str = Form(""),
     can_scan: str = Form(""),
     can_edit: str = Form(""),
+    shift_from: str = Form("10:00"),
+    shift_to: str = Form("22:00"),
 ) -> RedirectResponse:
     user = await _user(request)
     denied = _denied(user, owner_only=True)
     if denied:
         return denied
+    form = await request.form()
+    days = [str(value) for value in form.getlist("days")]
     factory = request.app.state.session_factory
     async with factory() as session:
         shop = await shop_for_member(session, user.max_user_id)
@@ -1324,11 +1713,46 @@ async def invite_staff(
             created_by=user.max_user_id,
             can_stats=_flag(can_stats),
             can_earn=_flag(can_earn),
-            can_scan=_flag(can_scan),
+            can_scan=_flag(can_scan)
+            or not any(_flag(item) for item in (can_stats, can_earn, can_edit)),
             can_edit=_flag(can_edit),
+            schedule_days=",".join(days),
+            shift_from=shift_from,
+            shift_to=shift_to,
         )
         await session.commit()
-    return RedirectResponse("/settings?flash=" + quote("Ссылка для кассира готова"), status_code=303)
+    return RedirectResponse("/biz/staff?flash=" + quote("Ссылка для кассира готова"), status_code=303)
+
+
+@router.get("/biz/staff", response_class=HTMLResponse)
+async def biz_staff_page(request: Request) -> HTMLResponse:
+    user = await _user(request)
+    denied = _denied(user, owner_only=True)
+    if denied:
+        return denied
+    factory = request.app.state.session_factory
+    bot = request.app.state.settings.max_bot_username or "t136_hakaton_max_bot"
+    base = _public_base(request)
+    async with factory() as session:
+        shop = await shop_for_member(session, user.max_user_id)
+        staff_rows = await list_shop_staff(session, shop) if shop else []
+        invites = await pending_invites(session, shop) if shop else []
+    return templates.TemplateResponse(
+        request,
+        "biz_staff.html",
+        _ctx(
+            request,
+            user=user,
+            title="Сотрудники",
+            shop=shop,
+            staff_rows=staff_rows,
+            invites=invites,
+            weekdays=WEEKDAYS,
+            invite_site=f"{base}/join",
+            invite_max=f"https://max.ru/{bot}?start=",
+            tab="staff",
+        ),
+    )
 
 
 @router.post("/biz/staff/{staff_id}")
@@ -1340,17 +1764,21 @@ async def update_staff(
     can_earn: str = Form(""),
     can_scan: str = Form(""),
     can_edit: str = Form(""),
+    shift_from: str = Form("10:00"),
+    shift_to: str = Form("22:00"),
 ) -> RedirectResponse:
     user = await _user(request)
     denied = _denied(user, owner_only=True)
     if denied:
         return denied
+    form = await request.form()
+    days = [str(value) for value in form.getlist("days")]
     factory = request.app.state.session_factory
     async with factory() as session:
         shop = await shop_for_member(session, user.max_user_id)
         row = await session.get(ShopStaff, staff_id)
         if shop is None or row is None or row.business_id != shop.id or row.kind == "owner":
-            return RedirectResponse("/settings", status_code=303)
+            return RedirectResponse("/biz/staff", status_code=303)
         if action == "remove":
             await session.delete(row)
         else:
@@ -1358,8 +1786,12 @@ async def update_staff(
             row.can_earn = _flag(can_earn)
             row.can_scan = _flag(can_scan)
             row.can_edit = _flag(can_edit)
+            days_value, start, end = normalize_schedule(days, shift_from, shift_to)
+            row.schedule_days = days_value
+            row.shift_from = start
+            row.shift_to = end
         await session.commit()
-    return RedirectResponse("/settings?flash=" + quote("Кассиры обновлены"), status_code=303)
+    return RedirectResponse("/biz/staff?flash=" + quote("Сотрудники обновлены"), status_code=303)
 
 
 @router.get("/me/qr", response_class=HTMLResponse)
@@ -1441,8 +1873,8 @@ async def charge_guest(
             return RedirectResponse(user.cabinet_path, status_code=303)
         if program_id:
             program = await session.get(LoyaltyProgram, program_id)
-            if program is None or program.business_id != shop.id or not program.is_active:
-                raise HTTPException(422, "Выберите активную акцию своей точки")
+            if program is None or program.business_id != shop.id:
+                raise HTTPException(422, "Выберите акцию своей точки")
         result = await record_purchase_for_guest(
             session,
             shop=shop,
@@ -1559,7 +1991,7 @@ async def make_promo_link(request: Request, program_id: str) -> RedirectResponse
     async with request.app.state.session_factory() as session:
         shop = await shop_for_member(session, user.max_user_id)
         program = await session.get(LoyaltyProgram, program_id)
-        if not shop or not program or program.business_id != shop.id or not program.is_active:
+        if not shop or not program or program.business_id != shop.id or not program_open(program):
             raise HTTPException(404)
         await create_promo_link(session, shop, program, created_by=user.max_user_id)
         await session.commit()
@@ -1577,25 +2009,34 @@ async def toggle_promo(request: Request, program_id: str):
         program = await session.get(LoyaltyProgram, program_id)
         if not shop or not program or program.business_id != shop.id:
             raise HTTPException(404)
-        program.is_active = not program.is_active
-        await session.commit()
+        if program.archived_at is None:
+            program.is_active = not program.is_active
+            await session.commit()
     return RedirectResponse("/biz/promos", status_code=303)
 
 
-@router.get("/biz/games")
-async def business_games_page(request: Request):
+@router.post("/biz/promos/{program_id}/delete")
+async def delete_promo(request: Request, program_id: str) -> RedirectResponse:
     user = await _user(request)
     denied = _denied(user, "edit")
     if denied:
         return denied
     async with request.app.state.session_factory() as session:
         shop = await shop_for_member(session, user.max_user_id)
-        challenges = await games(session, user.max_user_id, shop.id) if shop else []
-    return templates.TemplateResponse(
-        request,
-        "games.html",
-        _ctx(request, user=user, shop=shop, challenges=challenges, title="Игры", tab="games"),
+        program = await session.get(LoyaltyProgram, program_id)
+        if not shop or not program or program.business_id != shop.id:
+            raise HTTPException(404)
+        await archive_promo(session, program)
+        await session.commit()
+    return RedirectResponse(
+        "/biz/promos?flash=" + quote("Акцию сняли. Прогресс гостей сохранён — штампы не сгорают."),
+        status_code=303,
     )
+
+
+@router.get("/biz/games")
+async def business_games_page(request: Request):
+    return RedirectResponse("/biz/promos#games", status_code=303)
 
 
 @router.post("/biz/games")
@@ -1619,7 +2060,7 @@ async def create_game(
             Challenge(business_id=shop.id, title=title.strip(), goal=goal, reward_bonus=bonus)
         )
         await session.commit()
-    return RedirectResponse("/biz/games", status_code=303)
+    return RedirectResponse("/biz/promos#games", status_code=303)
 
 
 @router.post("/biz/games/{game_id}/toggle")
@@ -1635,7 +2076,7 @@ async def toggle_game(request: Request, game_id: str):
             raise HTTPException(404)
         game.is_active = not game.is_active
         await session.commit()
-    return RedirectResponse("/biz/games", status_code=303)
+    return RedirectResponse("/biz/promos#games", status_code=303)
 
 
 @router.post("/me/games/{game_id}/claim")

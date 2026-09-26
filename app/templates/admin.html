@@ -1,0 +1,44 @@
+{% extends "site_base.html" %}
+{% block content %}
+<p class="eyebrow">Администрирование</p>
+<header class="page-heading"><h1>Заявки бизнеса</h1></header>
+<p class="muted">Точки сами не появляются на карте. Сначала заявка — потом вы подтверждаете, и гости видят место.</p>
+{% for shop in pending %}
+<article class="panel">
+  <h2>{{ shop.name }}</h2>
+  <p class="muted">{{ shop.city }} · {{ shop.address }}</p>
+  {% if shop.website %}<p><a class="text-link" href="{{ shop.website }}" target="_blank" rel="noopener">{{ shop.website }}</a></p>{% endif %}
+  <p class="footnote">ИНН {{ shop.inn or 'нет' }} · {{ shop.director_name or 'без ФИО' }}</p>
+  {% if locations[shop.id] %}
+  <p class="footnote">Карта: {{ '%.5f'|format(locations[shop.id].latitude) }}, {{ '%.5f'|format(locations[shop.id].longitude) }}</p>
+  {% else %}
+  <p class="footnote">Координаты не указаны.</p>
+  {% endif %}
+  <form class="form-grid" method="post" action="/admin/{{ shop.id }}/review">
+    <button class="btn" name="action" value="approve">Подтвердить</button>
+    <button class="btn secondary" name="action" value="reject">Отклонить</button>
+  </form>
+</article>
+{% else %}
+<section class="empty-state"><h2>Новых заявок нет</h2><p>Когда точка отправит анкету, она появится здесь.</p></section>
+{% endfor %}
+<section class="panel">
+  <h2>Кто подтверждает</h2>
+  <p class="muted">Твой MAX id: <strong>{{ user.max_user_id }}</strong>. Второй админ заходит в Картыч, смотрит id в профиле — ты вписываешь его сюда.</p>
+  {% for person in admins %}
+  <article class="staff-card">
+    <strong>{{ person.name }}</strong>
+    <small>MAX {{ person.id }}{% if person.pinned %} · в настройках сервера{% endif %}{% if person.id == user.max_user_id %} · это ты{% endif %}</small>
+    {% if not person.pinned %}
+    <form method="post" action="/admin/admins/{{ person.id }}/remove">
+      <button class="btn secondary small">Снять</button>
+    </form>
+    {% endif %}
+  </article>
+  {% endfor %}
+  <form method="post" action="/admin/admins">
+    <label>MAX id нового админа<input name="max_user_id" inputmode="numeric" required placeholder="123456789"></label>
+    <button class="btn full">Добавить админа</button>
+  </form>
+</section>
+{% endblock %}

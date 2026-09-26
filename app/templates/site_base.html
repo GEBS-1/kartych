@@ -1,21 +1,27 @@
 {% from "partials/icons.html" import icon %}
 <!DOCTYPE html><html lang="ru"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#f5f7fb">
-<script>try { if (location.pathname === '/app' || sessionStorage.getItem('cup-miniapp') === '1') document.documentElement.classList.add('miniapp'); } catch {}</script>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#f3f5fa">
+<script>try { var t=localStorage.getItem('kartych-theme'); if (t==='dark'||t==='light') document.documentElement.setAttribute('data-theme', t); if (location.pathname === '/app' || sessionStorage.getItem('cup-miniapp') === '1') document.documentElement.classList.add('miniapp'); } catch {}</script>
 <title>{% if title and title != 'Картыч' %}{{ title }} · Картыч{% else %}Картыч{% endif %}</title>
 <link rel="icon" href="/static/favicon.png" type="image/png" sizes="192x192">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="shortcut icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/css/design.css?v=18"><script src="https://st.max.ru/js/max-web-app.js" async></script><script src="/static/js/max-auth.js?v=12" defer></script><script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" defer></script>{% block extra_head %}{% endblock %}<script src="/static/js/app.js?v=13" defer></script>
-</head><body data-role="{{ user.role if user else '' }}" data-cabinet="{{ 'biz' if user and user.in_business else 'guest' }}" data-page="{{ tab }}"><div class="app-shell">
+<link rel="stylesheet" href="/static/css/design.css?v=21"><script src="https://st.max.ru/js/max-web-app.js" async></script><script src="/static/js/max-auth.js?v=14" defer></script><script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" defer></script>{% block extra_head %}{% endblock %}<script src="/static/js/app.js?v=16" defer></script>
+</head><body data-role="{{ user.role if user else '' }}" data-cabinet="{{ 'guest' if not user or user.guest_view else 'biz' }}" data-page="{{ tab }}"><div class="app-shell">
 <header class="site-top">
   <a class="site-top-brand" href="/">
     <img class="brand-mark" src="/static/favicon.png" width="39" height="39" alt="">
     <span>Картыч<small>Больше возможностей рядом</small></span>
   </a>
-  {% if user and tab != "landing" %}{% with bar_place='top' %}{% include "partials/bar.html" %}{% endwith %}{% endif %}
-  {% if user %}
+  <button type="button" class="icon-button" id="theme-toggle" aria-label="Сменить тему"><span class="theme-sun">{{ icon('moon') }}</span><span class="theme-moon">{{ icon('sun') }}</span></button>
+  {% if user and user.in_business and tab != "landing" %}
+  {% if user.guest_view %}
+  <a class="btn small site-top-go" href="/as/biz">К точке</a>
+  {% else %}
+  <a class="btn small navy site-top-go" href="/as/guest">Как гость</a>
+  {% endif %}
+  {% elif user %}
   <a class="btn small site-top-go" href="{{ user.cabinet_path }}">В кабинет</a>
   {% else %}
   <a class="btn small site-top-go" href="/login">В кабинет</a>

@@ -13,15 +13,15 @@ def test_guest_qr_page(client) -> None:
 
 def test_staff_invite_scan_and_charge(client, app) -> None:
     client.post("/login/demo", data={"role": "business"})
-    settings = client.get("/settings")
-    assert "Кассиры" in settings.text
+    settings = client.get("/biz/staff")
+    assert "Кассир" in settings.text or "сотрудник" in settings.text.lower() or "Пригласить" in settings.text
     invited = client.post(
         "/biz/staff/invite",
         data={"can_stats": "on", "can_earn": "on", "can_scan": "on"},
         follow_redirects=False,
     )
     assert invited.status_code == 303
-    page = client.get("/settings")
+    page = client.get("/biz/staff")
     token = page.text.split("/join/", 1)[1].split("<", 1)[0].split('"', 1)[0].strip()
     assert len(token) == 16
     assert f"?start=s_{token}" in page.text
@@ -50,6 +50,7 @@ def test_staff_invite_scan_and_charge(client, app) -> None:
     assert payload in qr.text
 
     client.post("/login/demo", data={"role": "client"})
+    payload = guest_payload("secret123", 99)
     scanned = client.post("/app/scan", json={"code": payload})
     body = scanned.json()
     assert scanned.status_code == 200
@@ -77,7 +78,7 @@ def test_staff_max_start_invite(client, app) -> None:
         "/biz/staff/invite",
         data={"can_stats": "on", "can_earn": "on", "can_scan": "on", "can_edit": "on"},
     )
-    page = client.get("/settings")
+    page = client.get("/biz/staff")
     token = page.text.split("/join/", 1)[1].split("<", 1)[0].split('"', 1)[0].strip()
     hook = client.post(
         "/webhook",

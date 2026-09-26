@@ -28,18 +28,17 @@ def test_signed_login_restores_after_cookie_loss_and_remembers_role(client, app)
     response = client.post("/app/auth", json={"init_data": launch})
     assert response.status_code == 200
     assert f"Max-Age={TTL}" in response.headers["set-cookie"]
-    client.post("/settings", data={"role": "business"})
-    assert client.get("/app/session").json()["role"] == "business"
+    assert client.get("/app/session").json()["role"] == "client"
     home = client.get("/", follow_redirects=False)
     assert home.status_code == 200
     assert "Для гостя" in home.text
     for path in ["/app", "/login"]:
-        assert client.get(path, follow_redirects=False).headers["location"] == "/biz"
+        assert client.get(path, follow_redirects=False).headers["location"] == "/me"
     client.cookies.clear()
     assert client.get("/app/session").status_code == 401
     restored = client.post("/app/auth", json={"init_data": launch})
-    assert restored.json()["role"] == "business"
-    assert client.get("/biz").status_code == 200
+    assert restored.json()["role"] == "client"
+    assert client.get("/me").status_code == 200
 
 
 def test_secure_cookie_supports_embedded_max_and_logout(settings):

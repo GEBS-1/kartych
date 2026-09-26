@@ -1,17 +1,93 @@
 {% extends "site_base.html" %}{% block content %}
-<header class="profile-heading"><span class="avatar profile-avatar">{{ user.first_name[:1] }}</span><div><h1>{{ user.first_name }}</h1><p class="muted">{% if user.is_owner %}Кабинет бизнеса{% elif user.in_business %}Кассир{% else %}Покупай с выгодой{% endif %}</p></div><a href="#edit-profile" class="icon-button" aria-label="Редактировать профиль">{{ icon('edit') }}</a></header>
-{% if not user.is_owner %}<div class="profile-stats"><div><strong>{{ visits }}</strong><small>визитов</small></div><div><strong>{{ cards|length }}</strong><small>карт</small></div><div><strong>{{ bonus }}</strong><small>баллов</small></div></div>
-<section class="gold-banner"><h2>Любимые места —<br>больше подарков</h2><p>Находи новые точки и собирай бонусы за каждый визит.</p><a class="btn navy small" href="/me/shops">Найти место {{ icon('arrow') }}</a></section><a class="list-link" href="/me/league"><span>🏆 Моя лига</span><span>{{ ranking.mine.xp }} XP {{ icon('arrow') }}</span></a>
+<header class="profile-heading"><span class="avatar profile-avatar">{{ user.first_name[:1] }}</span><div><h1>{{ user.first_name }}</h1><p class="muted">{% if user.guest_view %}Покупай с выгодой{% elif user.is_owner %}Кабинет бизнеса{% elif user.is_cashier %}Кассир{% elif user.pending_shop %}Заявка на проверке{% else %}Покупай с выгодой{% endif %}</p></div></header>
+{% if user.guest_view %}
+<div class="profile-stats"><div><strong>{{ visits }}</strong><small>визитов</small></div><div><strong>{{ cards|length }}</strong><small>карт</small></div><div><strong>{{ bonus }}</strong><small>баллов</small></div></div>
+<section class="gold-banner"><h2>Любимые места —<br>больше подарков</h2><p>Находи подтверждённые точки и собирай бонусы за каждый визит.</p><a class="btn navy small" href="/me/shops">Найти место {{ icon('arrow') }}</a></section>
+{% if user.in_business %}
+<a class="list-link" href="/as/biz"><span>Кабинет точки</span><span>{{ icon('arrow') }}</span></a>
+{% elif user.pending_shop %}
+<p class="notice">Заявку на точку проверяем. Кабинет бизнеса откроется после подтверждения.</p>
+<a class="list-link" href="/biz/apply"><span>Заявка точки</span><span>{{ icon('arrow') }}</span></a>
+{% elif user.owns_shop and user.shop_status == 'rejected' %}
+<p class="notice">Предыдущую заявку отклонили. Можно отправить заново.</p>
+<a class="list-link" href="/biz/apply"><span>Открыть точку</span><span>{{ icon('arrow') }}</span></a>
+{% else %}
+<a class="list-link" href="/biz/apply"><span>Открыть точку</span><span>{{ icon('arrow') }}</span></a>
 {% endif %}
-{% if user.in_business and not user.is_owner and shop %}<section class="panel"><h2>Кассир «{{ shop.name }}»</h2><p class="muted">Владелец выдал тебе доступ. Менять настройки точки можно только если это разрешено.</p><div class="perm-pills">{% if user.can_stats %}<span class="badge">статистика</span>{% endif %}{% if user.can_earn %}<span class="badge">QR покупки</span>{% endif %}{% if user.can_scan %}<span class="badge">сканер</span>{% endif %}{% if user.can_edit %}<span class="badge green">правки</span>{% endif %}</div></section>{% endif %}
-<section class="panel" id="edit-profile"><h2>{{ 'Моя точка' if user.is_owner else 'Мой профиль' }}</h2><p class="muted">{{ user.display_name }}{% if user.username %} · @{{ user.username }}{% endif %}</p>
-{% if user.is_owner %}<form method="post" action="/biz/setup"><label>Название<input name="name" required maxlength="160" value="{{ shop.name if shop else '' }}" placeholder="Кофейня «Зерно»"></label><label>Город<input name="city" maxlength="160" value="{{ shop.city if shop else '' }}" placeholder="Москва"></label><label>Адрес<input name="address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="Улица и номер дома"></label><details><summary>Положение на карте</summary><p class="footnote">Укажи координаты точки, чтобы она появилась на карте у гостей. Их можно скопировать из карт.</p><div class="form-grid"><label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" value="{{ location.latitude if location else '' }}" placeholder="55.7558"></label><label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" value="{{ location.longitude if location else '' }}" placeholder="37.6173"></label></div></details><button class="btn full">Сохранить точку</button></form>{% endif %}
-<details class="role-settings"><summary>Переключить кабинет</summary><form method="post" action="/settings"><div class="role-pick"><label><input type="radio" name="role" value="client" {% if user.role != 'business' %}checked{% endif %}> Клиент</label><label><input type="radio" name="role" value="business" {% if user.role == 'business' %}checked{% endif %}> Бизнес</label></div><button class="btn secondary full">Переключить</button></form></details></section>
-{% if user.can_edit and shop %}<section class="panel"><h2>Меню и товары</h2><p class="muted">Товары видны гостям на странице точки.</p><form method="post" action="/biz/product"><label>Название<input name="name" required maxlength="160" placeholder="Капучино"></label><div class="form-grid"><label>Категория<input name="group_name" value="Основное" maxlength="80"></label><label>Цена, ₽<input name="price_rub" type="number" min="0" max="1000000" value="0"></label></div><button class="btn secondary full">Добавить товар</button></form><a class="text-link" href="/shops/{{ shop.id }}">Посмотреть страницу точки →</a></section>{% endif %}
-{% if user.is_owner and shop %}<section class="panel"><h2>Кассиры</h2><p class="muted">Отправь ссылку сотруднику в MAX. Он станет админом с теми правами, которые отметишь.</p>
-<form method="post" action="/biz/staff/invite"><div class="perm-pick"><label><input type="checkbox" name="can_stats" checked> Статистика</label><label><input type="checkbox" name="can_earn" checked> QR покупки</label><label><input type="checkbox" name="can_scan" checked> Сканер гостя</label><label><input type="checkbox" name="can_edit"> Менять акции</label></div><button class="btn full">Создать ссылку</button></form>
-{% for invite in invites %}<div class="invite-link"><p>Сайт: {{ invite_site }}/{{ invite.id }}</p><p>MAX: {{ invite_max }}s_{{ invite.id }}</p></div>{% endfor %}
-{% for person in staff_rows %}{% if person.kind != 'owner' %}<article class="staff-card"><strong>{{ person.name }}</strong>{% if person.username %}<small>@{{ person.username }}</small>{% endif %}
-<form method="post" action="/biz/staff/{{ person.id }}"><div class="perm-pick"><label><input type="checkbox" name="can_stats" {% if person.can_stats %}checked{% endif %}> Статистика</label><label><input type="checkbox" name="can_earn" {% if person.can_earn %}checked{% endif %}> QR покупки</label><label><input type="checkbox" name="can_scan" {% if person.can_scan %}checked{% endif %}> Сканер</label><label><input type="checkbox" name="can_edit" {% if person.can_edit %}checked{% endif %}> Правки</label></div><div class="form-grid"><button class="btn secondary" name="action" value="save">Сохранить</button><button class="btn secondary" name="action" value="remove">Убрать</button></div></form></article>{% endif %}{% endfor %}
-</section>{% endif %}
-<section class="panel help-list"><details><summary>Как это работает?</summary><p>Кассир может показать QR покупки с телефона. Либо гость показывает свой QR, а кассир считает его камерой и записывает покупку. Списание баллов тоже подтверждает кассир.</p></details><details><summary>Правила бонусов</summary><p>Баллы действуют только в месте, которое их начислило. У каждой акции свои условия. Задания учитывают визиты после запуска и выдают награду один раз.</p></details><details><summary>Данные профиля</summary><p>Имя и учётная запись приходят из MAX. В лиге показывается только первое имя. История покупок доступна тебе и соответствующей точке.</p></details></section><a class="list-link logout" href="/logout">Выйти из аккаунта {{ icon('arrow') }}</a><p class="account-note">Единый QR · Картыч · MAX</p>{% endblock %}
+<a class="list-link" href="/me/league"><span>🏆 Моя лига</span><span>{{ ranking.mine.xp }} XP {{ icon('arrow') }}</span></a>
+{% endif %}
+{% if user.is_admin %}
+<a class="list-link" href="/admin"><span>Заявки бизнеса</span><span>{{ icon('arrow') }}</span></a>
+{% endif %}
+{% if user.is_cashier and shop and not user.guest_view %}
+<section class="panel">
+  <h2>Профиль кассира</h2>
+  <p class="muted">Точка «{{ shop.name }}». Владелец выдал доступ и график смены.</p>
+  <p><strong>График:</strong> {{ user.schedule or 'не задан' }}</p>
+  <div class="perm-pills">
+    {% if user.can_stats %}<span class="badge">статистика</span>{% endif %}
+    {% if user.can_earn %}<span class="badge">показать QR</span>{% endif %}
+    {% if user.can_scan %}<span class="badge">сканер</span>{% endif %}
+    {% if user.can_edit %}<span class="badge green">правки</span>{% endif %}
+  </div>
+  <div class="form-grid" style="margin-top:14px">
+    {% if user.can_earn %}<a class="btn" href="/biz/earn">Показать QR</a>{% endif %}
+    {% if user.can_scan %}<a class="btn navy" href="/biz/scan">Сканировать QR</a>{% endif %}
+  </div>
+</section>
+{% endif %}
+<section class="panel" id="edit-profile">
+  <h2>{{ 'Моя точка' if user.is_owner and not user.guest_view else 'Мой профиль' }}</h2>
+  <p class="muted">{{ user.display_name }}{% if user.username %} · @{{ user.username }}{% endif %} · MAX {{ user.max_user_id }}</p>
+  {% if user.is_owner and not user.guest_view %}
+  <form method="post" action="/biz/setup">
+    <label>Название<input name="name" required maxlength="160" value="{{ shop.name if shop else '' }}" placeholder="Кофейня «Зерно»"></label>
+    <label>Город<input name="city" maxlength="160" value="{{ shop.city if shop else '' }}" placeholder="Москва"></label>
+    <label>Адрес<input name="address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="Улица и номер дома"></label>
+    <label>Сайт организации<input name="website" maxlength="240" value="{{ shop.website if shop else '' }}" placeholder="https://example.ru"></label>
+    <label>ИНН организации или ИП<input name="inn" inputmode="numeric" maxlength="12" value="{{ shop.inn if shop else '' }}" placeholder="10 или 12 цифр"></label>
+    <label>ФИО руководителя / ИП<input name="director_name" maxlength="160" value="{{ shop.director_name if shop else '' }}" placeholder="Иванов Иван Иванович"></label>
+    <details open><summary>Положение на карте</summary>
+      <p class="footnote">Адрес или координаты — чтобы гости находили точку на карте.</p>
+      <div class="form-grid">
+        <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" value="{{ location.latitude if location else '' }}" placeholder="55.7558"></label>
+        <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" value="{{ location.longitude if location else '' }}" placeholder="37.6173"></label>
+      </div>
+    </details>
+    <button class="btn full">Сохранить точку</button>
+  </form>
+  {% if shop %}<p class="footnote"><a class="text-link" href="/biz/staff">Сотрудники и график кассиров →</a> · <a class="text-link" href="/biz/promos">Акции и игры →</a></p>{% endif %}
+  {% endif %}
+</section>
+{% if user.can_edit and shop %}
+<section class="panel">
+  <h2>Меню и товары</h2>
+  <p class="muted">Товары видны гостям на странице точки. Можно править название, цену и скрыть позицию.</p>
+  {% for product in products %}
+  <form class="staff-card" method="post" action="/biz/product/{{ product.id }}">
+    <label>Название<input name="name" required maxlength="160" value="{{ product.name }}"></label>
+    <div class="form-grid">
+      <label>Категория<input name="group_name" maxlength="80" value="{{ product.group_name }}"></label>
+      <label>Цена, ₽<input name="price_rub" type="number" min="0" max="1000000" value="{{ product.price_rub }}"></label>
+    </div>
+    <div class="form-grid">
+      <button class="btn secondary" name="action" value="save">Сохранить</button>
+      <button class="btn secondary" name="action" value="hide">{{ 'Вернуть в меню' if not product.is_active else 'Скрыть' }}</button>
+    </div>
+    {% if not product.is_active %}<p class="footnote">Скрыт от гостей.</p>{% endif %}
+  </form>
+  {% endfor %}
+  <form method="post" action="/biz/product">
+    <label>Новый товар<input name="name" required maxlength="160" placeholder="Капучино"></label>
+    <div class="form-grid">
+      <label>Категория<input name="group_name" value="Основное" maxlength="80"></label>
+      <label>Цена, ₽<input name="price_rub" type="number" min="0" max="1000000" value="0"></label>
+    </div>
+    <button class="btn secondary full">Добавить товар</button>
+  </form>
+  <a class="text-link" href="/shops/{{ shop.id }}">Посмотреть страницу точки →</a>
+</section>
+{% endif %}
+<a class="list-link logout" href="/logout">Выйти из аккаунта {{ icon('arrow') }}</a>
+<p class="account-note">Единый QR · Картыч · MAX</p>
+{% endblock %}

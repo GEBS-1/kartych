@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     public_host: str = "your-domain.ru"
     letsencrypt_email: str = "you@example.com"
     max_ssl_verify: bool = True
+    admin_max_user_ids: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -55,6 +56,18 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() in {"prod", "production"}
+
+    def admin_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for item in self.admin_max_user_ids.replace(";", ",").split(","):
+            chunk = item.strip()
+            if not chunk:
+                continue
+            try:
+                ids.add(int(chunk))
+            except ValueError:
+                continue
+        return ids
 
 
 @lru_cache

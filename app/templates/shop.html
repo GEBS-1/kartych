@@ -2,7 +2,7 @@
 {% block content %}
 <p class="muted"><a href="/shops">← Каталог</a></p>
 <p class="eyebrow">{{ shop.city }}</p>
-<h1>{{ shop.name }}</h1>
+<h1>{{ shop.name }}{% if shop.verified_at %} <span class="badge green">подтверждён</span>{% endif %}</h1>
 <p class="muted">{{ shop.address }}</p>
 {% if user and user.role != "business" %}
   <form method="post" action="/me/join/{{ shop.id }}"><button type="submit">Подключить карту</button></form>

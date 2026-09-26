@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import (
 from app.config import Settings
 from app.db import Base
 from app.db import models as _models  # noqa: F401
-from app.db.models import Business, LoyaltyProgram, Product
+from datetime import UTC, datetime
+from app.db.models import Business, BusinessLocation, LoyaltyProgram, Product
 
 
 def create_engine(settings: Settings) -> AsyncEngine:
@@ -37,19 +38,36 @@ async def create_all(engine: AsyncEngine) -> None:
             "ALTER TABLE businesses ADD COLUMN city VARCHAR(160) DEFAULT ''",
             "ALTER TABLE businesses ADD COLUMN address VARCHAR(200) DEFAULT ''",
             "ALTER TABLE businesses ADD COLUMN category VARCHAR(40) DEFAULT 'shop'",
+            "ALTER TABLE businesses ADD COLUMN inn VARCHAR(12) DEFAULT ''",
+            "ALTER TABLE businesses ADD COLUMN director_name VARCHAR(160) DEFAULT ''",
+            "ALTER TABLE businesses ADD COLUMN verified_at DATETIME",
+            "ALTER TABLE businesses ADD COLUMN website VARCHAR(240) DEFAULT ''",
+            "ALTER TABLE businesses ADD COLUMN status VARCHAR(20) DEFAULT 'verified'",
             "ALTER TABLE loyalty_programs ADD COLUMN qty_required INTEGER DEFAULT 0",
             "ALTER TABLE loyalty_programs ADD COLUMN amount_required INTEGER DEFAULT 0",
             "ALTER TABLE loyalty_programs ADD COLUMN product_id VARCHAR(36)",
             "ALTER TABLE loyalty_programs ADD COLUMN group_name VARCHAR(80) DEFAULT ''",
             "ALTER TABLE loyalty_programs ADD COLUMN reward_bonus INTEGER DEFAULT 0",
+            "ALTER TABLE loyalty_programs ADD COLUMN archived_at DATETIME",
             "ALTER TABLE customers ADD COLUMN bonus INTEGER DEFAULT 0",
+            "ALTER TABLE shop_staff ADD COLUMN schedule_days VARCHAR(80) DEFAULT 'mon,tue,wed,thu,fri'",
+            "ALTER TABLE shop_staff ADD COLUMN shift_from VARCHAR(5) DEFAULT '10:00'",
+            "ALTER TABLE shop_staff ADD COLUMN shift_to VARCHAR(5) DEFAULT '22:00'",
+            "ALTER TABLE shop_invites ADD COLUMN schedule_days VARCHAR(80) DEFAULT 'mon,tue,wed,thu,fri'",
+            "ALTER TABLE shop_invites ADD COLUMN shift_from VARCHAR(5) DEFAULT '10:00'",
+            "ALTER TABLE shop_invites ADD COLUMN shift_to VARCHAR(5) DEFAULT '22:00'",
         ):
             # Inspect first: a duplicate-column error aborts a PostgreSQL transaction.
             table, column = sql.split()[2], sql.split()[5]
-            columns = await conn.run_sync(
-                lambda sync, name=table: {c["name"] for c in inspect(sync).get_columns(name)}
-            )
-            if column not in columns:
+
+            def _columns(sync, name=table):
+                inspector = inspect(sync)
+                if name not in inspector.get_table_names():
+                    return set()
+                return {c["name"] for c in inspector.get_columns(name)}
+
+            columns = await conn.run_sync(_columns)
+            if columns and column not in columns:
                 await conn.execute(text(sql))
 
 
@@ -68,15 +86,21 @@ async def seed_demo_shops(session: AsyncSession) -> None:
             row.city = city
             row.category = "shop"
     wanted = [
-        ("Точка на Ленина", "Москва", "Ленина, 10"),
-        ("Маркет 12", "Казань", "Баумана, 12"),
-        ("Студия", "Санкт-Петербург", "Невский, 8"),
+        ("Точка на Ленина", "Москва", "Ленина, 10", 55.7558, 37.6173),
+        ("Маркет 12", "Казань", "Баумана, 12", 55.7963, 49.1088),
+        ("Студия", "Санкт-Петербург", "Невский, 8", 59.9343, 30.3351),
     ]
-    for name, city, address in wanted:
+    for name, city, address, lat, lng in wanted:
         shop = await session.scalar(select(Business).where(Business.name == name))
         if shop is None:
             shop = Business(
-                name=name, city=city, address=address, category="shop", owner_max_user_id=None
+                name=name,
+                city=city,
+                address=address,
+                category="shop",
+                owner_max_user_id=None,
+                status="verified",
+                verified_at=datetime.now(UTC),
             )
             session.add(shop)
             await session.flush()
@@ -117,6 +141,12 @@ async def seed_demo_shops(session: AsyncSession) -> None:
         elif not shop.address:
             shop.address = address
             shop.city = city
+        shop.status = "verified"
+        if shop.verified_at is None:
+            shop.verified_at = datetime.now(UTC)
+        loc = await session.get(BusinessLocation, shop.id)
+        if loc is None:
+            session.add(BusinessLocation(business_id=shop.id, latitude=lat, longitude=lng))
     shops = (await session.scalars(select(Business))).all()
     for shop in shops:
         products = await session.scalar(

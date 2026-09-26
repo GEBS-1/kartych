@@ -50,10 +50,11 @@ try:
     else: raise RuntimeError('Staging health timeout; live version untouched')
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     base = 'http://127.0.0.1:8766'
-    for role, pages in [('client',['/me','/me/league','/me/shops','/me/qr','/settings']), ('business',['/biz','/biz/promos','/biz/games','/biz/earn','/biz/scan','/settings'])]:
+    for role, pages in [('client',['/me','/me/league','/me/shops','/me/qr','/settings','/biz/apply']), ('business',['/biz','/biz/promos','/biz/staff','/biz/earn','/biz/scan','/settings'])]:
         get(urllib.request.Request(base+'/login/demo', data=('role='+role).encode()), opener)
         for page in pages:
-            assert b'design.css?v=18' in get(base+page, opener), page
+            assert b'design.css?v=21' in get(base+page, opener), page
+            assert b'theme-toggle' in get(base+page, opener), page
     assert b'min-width: 900px' in get(base+'/static/css/design.css')
     print('STAGING_OK: client and business pages', flush=True)
 finally:
@@ -91,14 +92,20 @@ try:
         try:
             health=json.loads(get('http://127.0.0.1:8000/health'))
             assert health.get('ok') and health.get('postgres'), 'Database health failed'
-            assert b'design.css?v=18' in get('http://127.0.0.1:8000/login')
+            assert b'design.css?v=21' in get('http://127.0.0.1:8000/login')
             break
         except Exception: time.sleep(.5)
     else: raise RuntimeError('Updated service failed health checks')
     with sqlite3.connect(db) as conn:
         assert conn.execute('select count(*) from customers').fetchone()[0] >= before
         tables={row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
-        assert {'challenges','challenge_claims','business_locations','shop_staff','shop_invites','promo_links'} <= tables
+        assert {'challenges','challenge_claims','business_locations','shop_staff','shop_invites','promo_links','platform_admins'} <= tables
+        biz_cols={row[1] for row in conn.execute('pragma table_info(businesses)')}
+        assert {'inn','director_name','verified_at','website','status'} <= biz_cols
+        staff_cols={row[1] for row in conn.execute('pragma table_info(shop_staff)')}
+        assert {'schedule_days','shift_from','shift_to'} <= staff_cols
+        promo_cols={row[1] for row in conn.execute('pragma table_info(loyalty_programs)')}
+        assert 'archived_at' in promo_cols
     print(json.dumps({'deployed':release_id,'backup':str(backup),'public_url':values.get('PUBLIC_BASE_URL'), 'database_preserved':True,'settings_unchanged':True}),flush=True)
 except Exception:
     subprocess.run(['systemctl','stop','cupcard.service'],check=False)
