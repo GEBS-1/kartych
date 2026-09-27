@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from app.api.max_client import MaxAPIError, iter_subscriptions
+from app.api.max_client import MaxAPIError, extra_subscription_urls, iter_subscriptions
 
 log = logging.getLogger(__name__)
 
@@ -28,9 +28,18 @@ async def check_subscriptions(app: FastAPI) -> dict[str, Any]:
     try:
         payload = await client.get_subscriptions()
         status["subscriptions"] = iter_subscriptions(payload)
+        removed: list[str] = []
+        for url in extra_subscription_urls(payload, settings.webhook_url):
+            try:
+                await client.unsubscribe_webhook(url)
+                removed.append(url)
+                log.warning("dropped extra webhook subscription %s", url)
+            except MaxAPIError as exc:
+                log.warning("could not drop extra webhook %s: %s body=%s", url, exc, exc.body)
+        status["removed"] = removed
         if client.subscription_matches(payload):
             status["ok"] = True
-            status["action"] = "ok"
+            status["action"] = "pruned" if removed else "ok"
         else:
             log.warning("webhook subscription missing or stale, resubscribing to %s", settings.webhook_url)
             await client.subscribe_webhook()

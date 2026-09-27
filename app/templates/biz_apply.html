@@ -1,5 +1,5 @@
 {% extends "site_base.html" %}
-{% block extra_head %}<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.min.css"><script src="/static/vendor/leaflet/leaflet.min.js" defer></script>{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.min.css"><style>.leaflet-control-attribution,.leaflet-attribution-flag,.leaflet-control-container .leaflet-bottom.leaflet-right{display:none!important}</style><script src="/static/vendor/leaflet/leaflet.min.js" defer></script>{% endblock %}
 {% block content %}
 <a class="back-link" href="/settings">{{ icon('back') }} Профиль</a>
 <p class="eyebrow">Для бизнеса</p>

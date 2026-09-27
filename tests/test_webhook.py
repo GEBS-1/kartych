@@ -24,12 +24,12 @@ def test_bot_started_echo(client, app) -> None:
     assert "http" not in kwargs["text"].lower()
     assert kwargs["attachments"]
     buttons = kwargs["attachments"][0]["payload"]["buttons"]
-    assert buttons[0][0]["type"] == "callback"
+    assert buttons[0][0]["type"] == "open_app"
     assert buttons[0][0]["text"] == "Показать QR"
-    assert buttons[0][0]["payload"] == "showqr"
-    assert buttons[1][0]["type"] == "callback"
+    assert buttons[0][0]["payload"] == "qr"
+    assert buttons[1][0]["type"] == "open_app"
     assert buttons[1][0]["text"] == "Открыть кабинет"
-    assert buttons[1][0]["payload"] == "openapp"
+    assert buttons[1][0]["payload"] == "cabinet"
     assert buttons[2][0]["text"] == "Поддержка"
     assert buttons[2][0]["payload"] == "help"
     assert len(buttons) == 3
@@ -79,6 +79,53 @@ def test_scan_callback_opens_camera(client, app) -> None:
     button = kwargs["attachments"][0]["payload"]["buttons"][0][0]
     assert button["type"] == "open_app"
     assert button.get("payload") == "scan"
+
+
+def test_showqr_callback_opens_miniapp(client, app) -> None:
+    payload = {
+        "update_type": "message_callback",
+        "timestamp": 1,
+        "callback": {
+            "callback_id": "cb-qr",
+            "payload": "showqr",
+            "user": {"user_id": 42, "name": "Иван"},
+        },
+    }
+    response = client.post(
+        "/webhook",
+        json=payload,
+        headers={"X-Max-Bot-Api-Secret": "secret123"},
+    )
+    assert response.status_code == 200
+    assert app.state.max_client.send_message.await_count == 1
+    kwargs = app.state.max_client.send_message.await_args.kwargs
+    button = kwargs["attachments"][0]["payload"]["buttons"][0][0]
+    assert button["type"] == "open_app"
+    assert button.get("payload") == "qr"
+    assert "ниже" not in kwargs["text"].lower()
+
+
+def test_admin_callback_opens_review_queue(client, app) -> None:
+    payload = {
+        "update_type": "message_callback",
+        "timestamp": 1,
+        "callback": {
+            "callback_id": "cb-admin",
+            "payload": "admin",
+            "user": {"user_id": 99001, "name": "Админ"},
+        },
+    }
+    response = client.post(
+        "/webhook",
+        json=payload,
+        headers={"X-Max-Bot-Api-Secret": "secret123"},
+    )
+    assert response.status_code == 200
+    kwargs = app.state.max_client.send_message.await_args.kwargs
+    assert "заявк" in kwargs["text"].lower()
+    button = kwargs["attachments"][0]["payload"]["buttons"][0][0]
+    assert button["type"] == "open_app"
+    assert button.get("payload") == "admin"
 
 
 def test_ping_echo(client, app) -> None:

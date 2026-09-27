@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import secrets
 import segno
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
+from app.api.telegram_client import TelegramAPIError, TelegramClient
 from app.db.models import (
     AppUser,
     Business,
@@ -29,14 +31,17 @@ from app.web.insights import activity, analytics, games, league, utc
 from app.web.loyalty import (
     WEEKDAYS,
     accept_staff_invite,
+    add_network_point,
     add_platform_admin,
     add_product,
     add_promo,
+    add_telegram_subscriber,
     apply_for_business,
     apply_scan,
     archive_promo,
     business_people,
     can_scan_for_shop,
+    claim_first_admin,
     client_cards,
     create_earn_ticket,
     create_promo_link,
@@ -45,27 +50,35 @@ from app.web.loyalty import (
     create_staff_invite,
     ensure_customer,
     extra_admin_ids,
+    GAME_CATALOG,
     geocode_address,
     guest_payload,
+    guest_shop_profile,
     get_or_create_user,
+    get_telegram_config,
     inn_digits,
+    install_catalog_game,
     join_promo_token,
     list_shop_staff,
+    list_telegram_people,
     live_qr_payload,
     normalize_schedule,
     parse_promo_start,
     parse_staff_start,
-    pending_businesses,
     pending_invites,
+    points_for_owner,
     program_open,
     platform_admin_ids,
     promo_rule,
     recent_promo_links,
     record_purchase_for_guest,
     remove_platform_admin,
+    remove_telegram_subscriber,
     resolve_promo_link,
     save_shop_location,
+    save_telegram_bot,
     schedule_label,
+    search_businesses,
     set_shop_review,
     shop_directory,
     shop_for_member,
@@ -75,10 +88,14 @@ from app.web.loyalty import (
     shop_products,
     shop_programs,
     shop_public,
+    staff_for,
+    telegram_alert_chats,
     ticket_payload,
     update_product,
+    network_ids_for,
 )
 from app.web.max_login import tickets
+from app.webhooks.keyboards import launch_app_keyboard
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
@@ -144,6 +161,44 @@ def _first_name(display: str | None) -> str:
     return _pretty_name(display or "гость").split()[0]
 
 
+def launch_next(
+    start: str,
+    *,
+    in_business: bool,
+    can_scan: bool = False,
+    can_earn: bool = False,
+    is_admin: bool = False,
+) -> str:
+    start = (start or "").strip()
+    if start.startswith("s_"):
+        return "/biz/scan"
+    if start.startswith("p_"):
+        return "/me/qr"
+    key = start.lower()
+    if key in {"admin", "review"}:
+        return "/admin" if is_admin else "/me"
+    if key in {"qr", "showqr"} or key.endswith("qr"):
+        return "/biz/scan" if in_business and can_scan else "/me/qr"
+    if key in {"scan"} or key.endswith("scan"):
+        return "/biz/scan" if in_business and can_scan else "/me/scan"
+    if key in {"cabinet", "home", "openapp", "lk", "me"}:
+        return "/biz" if in_business else "/me"
+    return "/biz" if in_business else "/me"
+
+
+def _set_point_cookie(response: Response, request: Request, shop_id: str) -> None:
+    secure = request.app.state.settings.is_production or request.url.scheme == "https"
+    response.set_cookie(
+        "cup_point",
+        shop_id,
+        httponly=True,
+        secure=secure,
+        samesite="none" if secure else "lax",
+        max_age=TTL,
+        path="/",
+    )
+
+
 async def _user(request: Request) -> CurrentUser | None:
     factory = getattr(request.app.state, "session_factory", None)
     if factory is None:
@@ -157,6 +212,7 @@ async def _user(request: Request) -> CurrentUser | None:
             return None
         staff = await session.scalar(select(ShopStaff).where(ShopStaff.max_user_id == uid))
         owned = await shop_for_owner(session, uid)
+        points = await points_for_owner(session, uid) if owned is not None else []
         is_owner = False
         shop_id = None
         can_stats = can_earn = can_scan = can_edit = False
@@ -166,7 +222,10 @@ async def _user(request: Request) -> CurrentUser | None:
         if owned is not None and shop_is_live(owned):
             is_owner = True
             can_stats = can_earn = can_scan = can_edit = True
+            wanted = request.cookies.get("cup_point")
             shop_id = owned.id
+            if wanted and any(point.id == wanted for point in points):
+                shop_id = wanted
         elif staff is not None and staff.kind != "owner":
             staff_shop = await session.get(Business, staff.business_id)
             if staff_shop is not None and shop_is_live(staff_shop):
@@ -273,20 +332,32 @@ def _coords(latitude: str, longitude: str) -> tuple[float, float] | None:
     return lat, lng
 
 
-async def _notify_admins(request: Request, text: str) -> None:
+async def _notify_admins(request: Request, shop: Business) -> None:
+    text = (
+        "Новая заявка на точку в Картыч.\n"
+        f"«{shop.name}» · {shop.city} {shop.address}\n"
+        f"Сайт: {shop.website or 'нет'}\n"
+        f"ИНН: {shop.inn or 'нет'} · {shop.director_name or 'без ФИО'}\n"
+        "Нажми кнопку и подтверди точку."
+    )
     client = getattr(request.app.state, "max_client", None)
     factory = getattr(request.app.state, "session_factory", None)
-    if client is None:
-        return
-    ids = set(request.app.state.settings.admin_ids())
-    if factory is not None:
-        async with factory() as session:
-            ids |= await extra_admin_ids(session)
-    for uid in ids:
-        try:
-            await client.send_message(text=text, user_id=uid)
-        except Exception:
-            continue
+    if client is not None:
+        ids = set(request.app.state.settings.admin_ids())
+        if factory is not None:
+            async with factory() as session:
+                ids |= await extra_admin_ids(session)
+        username = getattr(getattr(client, "settings", None), "max_bot_username", "") or ""
+        attachments = launch_app_keyboard(
+            bot_username=username,
+            payload="admin",
+            label="Открыть заявку",
+        )
+        for uid in ids:
+            try:
+                await client.send_message(text=text, user_id=uid, attachments=attachments)
+            except Exception:
+                continue
 
 
 def _denied(
@@ -322,9 +393,30 @@ def _public_base(request: Request) -> str:
     return base or str(request.base_url).rstrip("/")
 
 
+def _launch_start(request: Request) -> str:
+    query = request.query_params
+    return (
+        query.get("start") or query.get("startapp") or query.get("WebAppStartParam") or ""
+    ).strip()
+
+
 @router.get("/")
 async def home(request: Request):
     user = await _user(request)
+    start = _launch_start(request)
+    if start:
+        if user is None:
+            return RedirectResponse(f"/app?start={quote(start, safe='')}", status_code=303)
+        return RedirectResponse(
+            launch_next(
+                start,
+                in_business=user.in_business,
+                can_scan=user.can_scan,
+                can_earn=user.can_earn,
+                is_admin=user.is_admin,
+            ),
+            status_code=303,
+        )
     return templates.TemplateResponse(
         request,
         "home.html",
@@ -345,12 +437,22 @@ async def qr_png(business_id: str, request: Request) -> Response:
 @router.get("/app")
 async def miniapp(request: Request):
     user = await _user(request)
-    if user is not None:
-        return RedirectResponse(user.cabinet_path, status_code=303)
+    start = _launch_start(request)
+    if user is not None and start:
+        return RedirectResponse(
+            launch_next(
+                start,
+                in_business=user.in_business,
+                can_scan=user.can_scan,
+                can_earn=user.can_earn,
+                is_admin=user.is_admin,
+            ),
+            status_code=303,
+        )
     return templates.TemplateResponse(
         request,
         "app.html",
-        _ctx(request, authed=False, role="none"),
+        _ctx(request, authed=bool(user), role=user.role if user else "none", user=user),
     )
 
 
@@ -394,10 +496,30 @@ async def miniapp_auth(request: Request) -> JSONResponse:
         promo_id = parse_promo_start(start_param)
         if promo_id:
             await join_promo_token(session, user, promo_id)
+        owned = await shop_for_owner(session, user.max_user_id)
+        staff_row = await staff_for(session, user.max_user_id)
+        in_business = bool(owned is not None and shop_is_live(owned))
+        can_scan = can_earn = in_business
+        if not in_business and staff_row is not None and staff_row.kind != "owner":
+            staff_shop = await session.get(Business, staff_row.business_id)
+            if staff_shop is not None and shop_is_live(staff_shop):
+                in_business = True
+                can_scan = staff_row.can_scan
+                can_earn = staff_row.can_earn
+        is_admin = user.max_user_id in await platform_admin_ids(session, settings)
+        next_url = launch_next(
+            start_param,
+            in_business=in_business,
+            can_scan=can_scan,
+            can_earn=can_earn,
+            is_admin=is_admin,
+        )
         await session.commit()
         role = user.role
         uid = user.max_user_id
-    response = JSONResponse({"ok": True, "role": role, "start_param": start_param})
+    response = JSONResponse(
+        {"ok": True, "role": role, "start_param": start_param, "next": next_url}
+    )
     set_session(
         response,
         settings.webhook_secret,
@@ -500,7 +622,7 @@ async def business_home(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(request, "partials/gate.html", _ctx(request))
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         people: list[dict[str, Any]] = []
         program = None
         if shop is not None:
@@ -561,7 +683,7 @@ async def business_qr(request: Request) -> HTMLResponse:
         return HTMLResponse("<p class='muted'>Сначала войди в кабинет.</p>")
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
     if shop is None or not shop_is_live(shop):
         return HTMLResponse("<p class='muted'>Сначала подтвердим точку.</p>")
     payload = live_qr_payload(request.app.state.settings.webhook_secret, shop.id)
@@ -702,6 +824,9 @@ async def login_page(request: Request):
     if user is not None:
         if promo:
             return RedirectResponse(f"/promo/{promo}", status_code=303)
+        nxt = (request.query_params.get("next") or "").strip()
+        if nxt == "/admin":
+            return RedirectResponse("/admin", status_code=303)
         return RedirectResponse(user.cabinet_path, status_code=303)
     error = ""
     if request.query_params.get("err") == "expired":
@@ -842,6 +967,7 @@ async def login_demo(request: Request, role: str = Form("client")) -> RedirectRe
 async def logout(request: Request) -> RedirectResponse:
     response = RedirectResponse("/", status_code=303)
     response.delete_cookie("cup_session", path="/")
+    response.delete_cookie("cup_point", path="/")
     if request.app.state.settings.is_production or request.url.scheme == "https":
         response.headers.append(
             "set-cookie",
@@ -859,7 +985,7 @@ async def settings_page(request: Request) -> HTMLResponse:
     bot = request.app.state.settings.max_bot_username or "t136_hakaton_max_bot"
     base = _public_base(request)
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         location = await session.get(BusinessLocation, shop.id) if shop else None
         cards = await client_cards(session, user.max_user_id)
         events = await activity(session, user_id=user.max_user_id)
@@ -876,6 +1002,8 @@ async def settings_page(request: Request) -> HTMLResponse:
             staff_self = await session.scalar(
                 select(ShopStaff).where(ShopStaff.max_user_id == user.max_user_id)
             )
+        points = await points_for_owner(session, user.max_user_id) if user.is_owner else []
+        hq = await shop_for_owner(session, user.max_user_id) if user.is_owner else None
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -898,6 +1026,8 @@ async def settings_page(request: Request) -> HTMLResponse:
             invite_max=f"https://max.ru/{bot}?start=",
             tab="settings",
             apply_url="/biz/apply",
+            points=points,
+            hq=hq,
         ),
     )
 
@@ -1013,14 +1143,7 @@ async def biz_apply_post(
         await session.commit()
     if state == "already":
         return RedirectResponse("/biz", status_code=303)
-    await _notify_admins(
-        request,
-        "Новая заявка на точку в Картыч.\n"
-        f"«{shop.name}» · {shop.city} {shop.address}\n"
-        f"Сайт: {shop.website or 'нет'}\n"
-        f"ИНН: {shop.inn or 'нет'} · {shop.director_name or 'без ФИО'}\n"
-        f"Проверить: {_public_base(request)}/admin",
-    )
+    await _notify_admins(request, shop)
     return RedirectResponse(
         "/biz/apply?flash=" + quote("Заявку отправили. Когда подтвердим точку — откроется кабинет бизнеса."),
         status_code=303,
@@ -1031,13 +1154,14 @@ async def biz_apply_post(
 async def admin_page(request: Request) -> HTMLResponse:
     user = await _user(request)
     if user is None:
-        return RedirectResponse("/login", status_code=303)
-    if not user.is_admin:
-        return RedirectResponse("/me", status_code=303)
+        return RedirectResponse("/login?next=/admin", status_code=303)
     factory = request.app.state.session_factory
     pinned = request.app.state.settings.admin_ids()
+    query = (request.query_params.get("q") or "").strip()
     async with factory() as session:
-        pending = await pending_businesses(session)
+        has_admins = bool(await platform_admin_ids(session, request.app.state.settings))
+        mode = "inbox" if user.is_admin else ("claim" if not has_admins else "denied")
+        pending = await search_businesses(session, query) if mode == "inbox" else []
         locations = {
             loc.business_id: loc
             for loc in (await session.scalars(select(BusinessLocation))).all()
@@ -1059,13 +1183,28 @@ async def admin_page(request: Request) -> HTMLResponse:
         _ctx(
             request,
             user=user,
-            title="Заявки бизнеса",
+            title="Заявки",
             pending=pending,
+            query=query,
             locations=locations,
             admins=admins,
+            admin_mode=mode,
+            admin_link=f"{_public_base(request)}/admin",
             tab="settings",
         ),
     )
+
+
+@router.post("/admin/claim")
+async def admin_claim(request: Request) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login?next=/admin", status_code=303)
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        ok, message = await claim_first_admin(session, user.max_user_id, request.app.state.settings)
+        await session.commit()
+    return RedirectResponse("/admin?flash=" + quote(message), status_code=303)
 
 
 @router.post("/admin/admins")
@@ -1096,6 +1235,82 @@ async def admin_remove(request: Request, max_user_id: int) -> RedirectResponse:
     pinned = request.app.state.settings.admin_ids()
     async with factory() as session:
         ok, message = await remove_platform_admin(session, max_user_id, pinned=pinned)
+        await session.commit()
+    return RedirectResponse("/admin?flash=" + quote(message), status_code=303)
+
+
+@router.post("/admin/telegram")
+async def admin_telegram_bot(request: Request, bot_token: str = Form("")) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/me", status_code=303)
+    token = bot_token.strip()
+    if not token:
+        return RedirectResponse("/admin?flash=" + quote("Нужен токен от @BotFather."), status_code=303)
+    client = TelegramClient(token)
+    try:
+        me = await client.get_me()
+        username = str(me.get("username") or "")
+        secret = secrets.token_hex(16)
+        factory = request.app.state.session_factory
+        async with factory() as session:
+            await save_telegram_bot(
+                session, token=token, username=username, webhook_secret=secret
+            )
+            await session.commit()
+        request.app.state.telegram = client
+        settings = request.app.state.settings
+        if settings.app_env != "test" and settings.public_base_url.startswith("https://"):
+            await client.set_webhook(f"{settings.public_base_url.rstrip('/')}/telegram/webhook", secret)
+        handle = f"@{username}" if username else "бот"
+        return RedirectResponse(
+            "/admin?flash=" + quote(f"Telegram {handle} подключен. Люди жмут Start — и им пишутся заявки."),
+            status_code=303,
+        )
+    except TelegramAPIError:
+        await client.aclose()
+        return RedirectResponse(
+            "/admin?flash=" + quote("Токен не принят. Проверь, что скопировал его из @BotFather целиком."),
+            status_code=303,
+        )
+
+
+@router.post("/admin/telegram/people")
+async def admin_telegram_add(request: Request, chat_id: str = Form("")) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/me", status_code=303)
+    raw = chat_id.strip().replace(" ", "")
+    try:
+        uid = int(raw)
+    except ValueError:
+        return RedirectResponse(
+            "/admin?flash=" + quote("Нужен числовой Telegram chat id, или человек пусть нажмёт Start у бота."),
+            status_code=303,
+        )
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        await add_telegram_subscriber(session, uid, added_by=user.max_user_id)
+        await session.commit()
+    return RedirectResponse("/admin?flash=" + quote("Человека добавили. Ему придут новые заявки."), status_code=303)
+
+
+@router.post("/admin/telegram/people/{chat_id}/remove")
+async def admin_telegram_remove(request: Request, chat_id: int) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not user.is_admin:
+        return RedirectResponse("/me", status_code=303)
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        ok, message = await remove_telegram_subscriber(
+            session, chat_id, pinned=request.app.state.settings.telegram_ids()
+        )
         await session.commit()
     return RedirectResponse("/admin?flash=" + quote(message), status_code=303)
 
@@ -1198,6 +1413,12 @@ async def join_shop(request: Request, shop_id: str) -> RedirectResponse:
     if user is None:
         return RedirectResponse("/login", status_code=303)
     factory = request.app.state.session_factory
+    form = {}
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+    code = str(form.get("ref") or request.query_params.get("ref") or "").strip().lower()
     async with factory() as session:
         from app.db.models import Business
 
@@ -1213,7 +1434,7 @@ async def join_shop(request: Request, shop_id: str) -> RedirectResponse:
                 )
             if db_user.role == UserRole.NONE.value:
                 db_user.role = UserRole.CLIENT.value
-            await ensure_customer(session, shop, db_user)
+            await ensure_customer(session, shop, db_user, referral_code=code)
             await session.commit()
     return RedirectResponse("/me", status_code=303)
 
@@ -1339,7 +1560,7 @@ async def biz_page(request: Request) -> HTMLResponse:
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         people = await business_people(session, shop) if shop else []
         history = await shop_history(session, shop) if shop else []
         products = await shop_products(session, shop.id) if shop else []
@@ -1376,7 +1597,7 @@ async def biz_contests_page(request: Request) -> HTMLResponse:
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         programs = (
             list(
                 (
@@ -1389,7 +1610,11 @@ async def biz_contests_page(request: Request) -> HTMLResponse:
             else []
         )
         links = await recent_promo_links(session, shop) if shop else {}
-        challenges = await games(session, user.max_user_id, shop.id) if shop else []
+        game_shop = (
+            await shop_for_owner(session, user.max_user_id) if user.is_owner else shop
+        )
+        challenges = await games(session, user.max_user_id, game_shop.id) if game_shop else []
+    installed = {item["game"].slug for item in challenges if item["game"].slug}
     return templates.TemplateResponse(
         request,
         "biz_contests.html",
@@ -1400,6 +1625,8 @@ async def biz_contests_page(request: Request) -> HTMLResponse:
             shop=shop,
             programs=programs,
             challenges=challenges,
+            catalog=GAME_CATALOG,
+            installed=installed,
             promo_links=links,
             promo_site=f"{_public_base(request)}/promo",
             promo_max=(
@@ -1418,7 +1645,7 @@ async def biz_clients_page(request: Request) -> HTMLResponse:
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         stats = await analytics(session, shop, "month")
         people = stats["people"]
     return templates.TemplateResponse(
@@ -1439,6 +1666,7 @@ async def biz_setup(
     longitude: str = Form(""),
     inn: str = Form(""),
     director_name: str = Form(""),
+    org_name: str = Form(""),
 ) -> RedirectResponse:
     user = await _user(request)
     denied = _denied(user, owner_only=True)
@@ -1450,15 +1678,28 @@ async def biz_setup(
             select(AppUser).where(AppUser.max_user_id == user.max_user_id)
         )
         if db_user is not None:
-            shop = await shop_for_member(session, user.max_user_id)
+            shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
             if shop is None:
                 return RedirectResponse("/biz/apply", status_code=303)
             shop.name, shop.city, shop.address = name.strip(), city.strip(), address.strip()
             if not shop.name:
                 raise HTTPException(422, "Укажите название точки")
+            brand = org_name.strip() or shop.org_name or shop.name
             shop.inn = inn_digits(inn)
             shop.director_name = director_name.strip()
             shop.website = website.strip()[:240]
+            shop.org_name = brand
+            hq = await shop_for_owner(session, user.max_user_id)
+            if hq is not None:
+                hq.org_name = brand
+                hq.inn = shop.inn
+                hq.director_name = shop.director_name
+                hq.website = shop.website
+                for point in await points_for_owner(session, user.max_user_id):
+                    point.org_name = brand
+                    point.inn = shop.inn
+                    point.director_name = shop.director_name
+                    point.website = shop.website
             coords = _coords(latitude, longitude)
             if coords is not None:
                 await save_shop_location(session, shop, coords[0], coords[1])
@@ -1468,6 +1709,58 @@ async def biz_setup(
                     await session.delete(loc)
             await session.commit()
     return RedirectResponse("/settings", status_code=303)
+
+
+@router.post("/biz/point")
+async def add_point(
+    request: Request,
+    name: str = Form(..., min_length=1, max_length=160),
+    city: str = Form("", max_length=160),
+    address: str = Form("", max_length=200),
+    latitude: str = Form(""),
+    longitude: str = Form(""),
+) -> RedirectResponse:
+    user = await _user(request)
+    denied = _denied(user, owner_only=True)
+    if denied:
+        return denied
+    async with request.app.state.session_factory() as session:
+        hq = await shop_for_owner(session, user.max_user_id)
+        if hq is None or not shop_is_live(hq):
+            return RedirectResponse("/biz/apply", status_code=303)
+        coords = _coords(latitude, longitude)
+        await add_network_point(
+            session,
+            hq,
+            name=name,
+            city=city,
+            address=address,
+            latitude=coords[0] if coords else None,
+            longitude=coords[1] if coords else None,
+        )
+        await session.commit()
+    return RedirectResponse(
+        "/settings?flash=" + quote("Точка сети добавлена. Это устройство остаётся на текущей."),
+        status_code=303,
+    )
+
+
+@router.post("/biz/point/use")
+async def use_point(request: Request, shop_id: str = Form(...)) -> RedirectResponse:
+    user = await _user(request)
+    denied = _denied(user, owner_only=True)
+    if denied:
+        return denied
+    async with request.app.state.session_factory() as session:
+        points = await points_for_owner(session, user.max_user_id)
+    if not any(point.id == shop_id for point in points):
+        raise HTTPException(404)
+    response = RedirectResponse(
+        "/settings?flash=" + quote("Это устройство теперь работает с выбранной точкой"),
+        status_code=303,
+    )
+    _set_point_cookie(response, request, shop_id)
+    return response
 
 
 @router.post("/biz/product")
@@ -1483,7 +1776,7 @@ async def biz_product(
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         if shop is not None:
             await add_product(session, shop, name=name, group_name=group_name, price_rub=price_rub)
             await session.commit()
@@ -1505,7 +1798,7 @@ async def biz_product_update(
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         if shop is not None:
             product = await session.get(Product, product_id)
             if product is not None and product.business_id == shop.id:
@@ -1542,7 +1835,7 @@ async def biz_promo(
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         if shop is not None:
             mark = goal if goal > 0 else 5
             name = title.strip() or reward
@@ -1569,7 +1862,7 @@ async def biz_earn_form(request: Request) -> RedirectResponse:
     if denied:
         return denied
     async with request.app.state.session_factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         programs = await shop_programs(session, shop.id) if shop else []
     return templates.TemplateResponse(
         request,
@@ -1594,7 +1887,7 @@ async def biz_earn_make(
     factory = request.app.state.session_factory
     secret = request.app.state.settings.webhook_secret
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         if shop is None:
             return RedirectResponse("/biz", status_code=303)
         if program_id:
@@ -1704,7 +1997,7 @@ async def invite_staff(
     days = [str(value) for value in form.getlist("days")]
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         if shop is None:
             return RedirectResponse("/settings", status_code=303)
         await create_staff_invite(
@@ -1734,7 +2027,7 @@ async def biz_staff_page(request: Request) -> HTMLResponse:
     bot = request.app.state.settings.max_bot_username or "t136_hakaton_max_bot"
     base = _public_base(request)
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         staff_rows = await list_shop_staff(session, shop) if shop else []
         invites = await pending_invites(session, shop) if shop else []
     return templates.TemplateResponse(
@@ -1775,7 +2068,7 @@ async def update_staff(
     days = [str(value) for value in form.getlist("days")]
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         row = await session.get(ShopStaff, staff_id)
         if shop is None or row is None or row.business_id != shop.id or row.kind == "owner":
             return RedirectResponse("/biz/staff", status_code=303)
@@ -1794,6 +2087,20 @@ async def update_staff(
     return RedirectResponse("/biz/staff?flash=" + quote("Сотрудники обновлены"), status_code=303)
 
 
+def _qr_destination(user: CurrentUser) -> str:
+    if user.can_scan and not user.guest_view:
+        return "/biz/scan"
+    return "/me/qr"
+
+
+@router.get("/qr")
+async def smart_qr(request: Request) -> RedirectResponse:
+    user = await _user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    return RedirectResponse(_qr_destination(user), status_code=303)
+
+
 @router.get("/me/qr", response_class=HTMLResponse)
 async def guest_qr_page(request: Request) -> HTMLResponse:
     user = await _user(request)
@@ -1808,7 +2115,7 @@ async def guest_qr_page(request: Request) -> HTMLResponse:
             user=user,
             title="Мой QR",
             heading="Мой QR",
-            caption="На кассе нажми QR. Кассир считает код и запишет покупку в акцию.",
+            caption="Создавать QR не нужно — это твой постоянный код по ID. Кассир считает его и видит тебя в базе.",
             qr_svg=_qr_svg(payload),
             payload=payload,
             back="/me",
@@ -1826,11 +2133,13 @@ async def charge_form(request: Request, guest_id: int) -> HTMLResponse:
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         guest = await session.scalar(select(AppUser).where(AppUser.max_user_id == guest_id))
-        programs = await shop_programs(session, shop.id) if shop else []
-    if shop is None or guest is None:
-        return RedirectResponse("/biz/scan?flash=" + quote("Гость не найден"), status_code=303)
+        if shop is None or guest is None:
+            return RedirectResponse("/biz/scan?flash=" + quote("Гость не найден"), status_code=303)
+        profile = await guest_shop_profile(session, shop, guest)
+        programs = await shop_programs(session, shop.id)
+        await session.commit()
     return templates.TemplateResponse(
         request,
         "charge_form.html",
@@ -1839,8 +2148,9 @@ async def charge_form(request: Request, guest_id: int) -> HTMLResponse:
             user=user,
             shop=shop,
             guest=guest,
+            profile=profile,
             programs=programs,
-            title="Записать покупку",
+            title="Гость в базе",
             tab="scan",
         ),
     )
@@ -1862,7 +2172,7 @@ async def charge_guest(
         return denied
     factory = request.app.state.session_factory
     async with factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         cashier = await session.scalar(
             select(AppUser).where(AppUser.max_user_id == user.max_user_id)
         )
@@ -1989,7 +2299,7 @@ async def make_promo_link(request: Request, program_id: str) -> RedirectResponse
     if denied:
         return denied
     async with request.app.state.session_factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         program = await session.get(LoyaltyProgram, program_id)
         if not shop or not program or program.business_id != shop.id or not program_open(program):
             raise HTTPException(404)
@@ -2005,7 +2315,7 @@ async def toggle_promo(request: Request, program_id: str):
     if denied:
         return denied
     async with request.app.state.session_factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         program = await session.get(LoyaltyProgram, program_id)
         if not shop or not program or program.business_id != shop.id:
             raise HTTPException(404)
@@ -2022,7 +2332,7 @@ async def delete_promo(request: Request, program_id: str) -> RedirectResponse:
     if denied:
         return denied
     async with request.app.state.session_factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         program = await session.get(LoyaltyProgram, program_id)
         if not shop or not program or program.business_id != shop.id:
             raise HTTPException(404)
@@ -2051,14 +2361,45 @@ async def create_game(
     if denied:
         return denied
     async with request.app.state.session_factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = (
+            await shop_for_owner(session, user.max_user_id)
+            if user.is_owner
+            else await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
+        )
         if not shop:
             raise HTTPException(403)
         if not title.strip():
             raise HTTPException(422, "Введите название задания")
         session.add(
-            Challenge(business_id=shop.id, title=title.strip(), goal=goal, reward_bonus=bonus)
+            Challenge(
+                business_id=shop.id,
+                title=title.strip(),
+                kind="visits",
+                goal=goal,
+                reward_bonus=bonus,
+            )
         )
+        await session.commit()
+    return RedirectResponse("/biz/promos#games", status_code=303)
+
+
+@router.post("/biz/games/catalog")
+async def create_catalog_game(request: Request, slug: str = Form(...)):
+    user = await _user(request)
+    denied = _denied(user, "edit")
+    if denied:
+        return denied
+    async with request.app.state.session_factory() as session:
+        shop = (
+            await shop_for_owner(session, user.max_user_id)
+            if user.is_owner
+            else await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
+        )
+        if not shop:
+            raise HTTPException(403)
+        game = await install_catalog_game(session, shop, slug.strip())
+        if game is None:
+            raise HTTPException(422, "Нет такой игры в каталоге")
         await session.commit()
     return RedirectResponse("/biz/promos#games", status_code=303)
 
@@ -2070,9 +2411,10 @@ async def toggle_game(request: Request, game_id: str):
     if denied:
         return denied
     async with request.app.state.session_factory() as session:
-        shop = await shop_for_member(session, user.max_user_id)
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         game = await session.get(Challenge, game_id)
-        if not shop or not game or game.business_id != shop.id:
+        allowed = set(await network_ids_for(session, shop)) if shop else set()
+        if not shop or not game or game.business_id not in allowed:
             raise HTTPException(404)
         game.is_active = not game.is_active
         await session.commit()
@@ -2081,7 +2423,6 @@ async def toggle_game(request: Request, game_id: str):
 
 @router.post("/me/games/{game_id}/claim")
 async def claim_game(request: Request, game_id: str):
-    from sqlalchemy import update
     from sqlalchemy.exc import IntegrityError
 
     user = await _user(request)
@@ -2091,10 +2432,12 @@ async def claim_game(request: Request, game_id: str):
         game = await session.get(Challenge, game_id)
         if not game or not game.is_active:
             raise HTTPException(404)
+        shop = await session.get(Business, game.business_id)
+        network = set(await network_ids_for(session, shop)) if shop else {game.business_id}
         customer = await session.scalar(
             select(Customer)
             .where(
-                Customer.max_user_id == user.max_user_id, Customer.business_id == game.business_id
+                Customer.max_user_id == user.max_user_id, Customer.business_id.in_(network)
             )
             .with_for_update()
         )
@@ -2109,16 +2452,42 @@ async def claim_game(request: Request, game_id: str):
             return RedirectResponse(
                 "/me/league?flash=" + quote("Награда уже получена"), status_code=303
             )
-        events = await activity(session, business_id=game.business_id, user_id=user.max_user_id)
-        if sum(1 for e in events if e["at"] >= utc(game.created_at)) < game.goal:
-            raise HTTPException(400, "Задание ещё не выполнено")
+        kind = game.kind or "visits"
+        if kind == "referral":
+            invited = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Customer)
+                    .where(
+                        Customer.business_id.in_(network),
+                        Customer.referred_by == user.max_user_id,
+                        Customer.created_at >= game.created_at,
+                    )
+                )
+                or 0
+            )
+            if invited < game.goal:
+                raise HTTPException(400, "Задание ещё не выполнено")
+            payout = game.reward_bonus
+        else:
+            events = await activity(session, user_id=user.max_user_id)
+            progress = sum(
+                1
+                for event in events
+                if event["shop"] in network and event["at"] >= utc(game.created_at)
+            )
+            if progress < game.goal:
+                raise HTTPException(400, "Задание ещё не выполнено")
+            payout = game.reward_bonus
+            if kind == "wheel":
+                payout = 10 + secrets.randbelow(max(1, game.reward_bonus - 9))
         session.add(ChallengeClaim(challenge_id=game.id, customer_id=customer.id))
         try:
             await session.flush()
             await session.execute(
                 update(Customer)
                 .where(Customer.id == customer.id)
-                .values(bonus=Customer.bonus + game.reward_bonus)
+                .values(bonus=Customer.bonus + payout)
             )
             await session.commit()
         except IntegrityError:

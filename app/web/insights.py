@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.models import AppUser, Business, Challenge, ChallengeClaim, Customer, Receipt, Visit
+from app.web.loyalty import network_ids_for
 
 
 def utc(value):
@@ -112,6 +113,7 @@ async def analytics(session, shop, period):
         people.append(
             {
                 "name": customer.display_name or "Гость",
+                "guest_id": customer.max_user_id,
                 "visits": len(mine),
                 "bonus": customer.bonus,
                 "last": last.strftime("%d.%m.%Y") if last else "Без покупок",
@@ -173,16 +175,43 @@ async def games(session, uid, business_id=None):
             )
         ).all()
     )
-    return [
-        {
-            "game": game,
-            "shop": name,
-            "progress": sum(
-                1
-                for e in events
-                if e["shop"] == game.business_id and e["at"] >= utc(game.created_at)
-            ),
-            "claimed": game.id in claims,
-        }
-        for game, name in (await session.execute(query.order_by(Challenge.created_at.desc()))).all()
-    ]
+    items = []
+    mine = {
+        row.business_id: row
+        for row in (
+            await session.scalars(select(Customer).where(Customer.max_user_id == uid))
+        ).all()
+    }
+    for game, name in (await session.execute(query.order_by(Challenge.created_at.desc()))).all():
+        shop_row = await session.get(Business, game.business_id)
+        network = set(await network_ids_for(session, shop_row)) if shop_row else {game.business_id}
+        kind = game.kind or "visits"
+        if kind == "referral":
+            progress = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Customer)
+                    .where(
+                        Customer.business_id.in_(network),
+                        Customer.referred_by == uid,
+                        Customer.created_at >= game.created_at,
+                    )
+                )
+                or 0
+            )
+        else:
+            progress = sum(
+                1 for e in events if e["shop"] in network and e["at"] >= utc(game.created_at)
+            )
+        customer = mine.get(game.business_id)
+        items.append(
+            {
+                "game": game,
+                "shop": name,
+                "kind": kind,
+                "progress": progress,
+                "claimed": game.id in claims,
+                "referral_code": customer.referral_code if customer else "",
+            }
+        )
+    return items

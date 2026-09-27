@@ -138,12 +138,48 @@ class MaxClient:
                 return needed.issubset(types) if types else True
         return False
 
+    def extra_subscription_urls(self, payload: dict[str, Any]) -> list[str]:
+        return extra_subscription_urls(payload, self.settings.webhook_url)
+
+    async def prune_extra_webhooks(self, payload: dict[str, Any] | None = None) -> list[str]:
+        current = payload if payload is not None else await self.get_subscriptions()
+        removed: list[str] = []
+        for url in self.extra_subscription_urls(current):
+            await self.unsubscribe_webhook(url)
+            removed.append(url)
+        return removed
+
     async def ensure_webhook(self) -> dict[str, Any]:
         current = await self.get_subscriptions()
+        removed = await self.prune_extra_webhooks(current)
         if self.subscription_matches(current):
-            return {"ok": True, "action": "already_subscribed", "subscriptions": current}
+            action = "pruned" if removed else "already_subscribed"
+            return {
+                "ok": True,
+                "action": action,
+                "removed": removed,
+                "subscriptions": current,
+            }
         created = await self.subscribe_webhook()
-        return {"ok": True, "action": "subscribed", "result": created, "subscriptions": current}
+        return {
+            "ok": True,
+            "action": "subscribed",
+            "removed": removed,
+            "result": created,
+            "subscriptions": current,
+        }
+
+
+def extra_subscription_urls(payload: dict[str, Any], wanted: str) -> list[str]:
+    wanted = wanted.rstrip("/")
+    extras: list[str] = []
+    seen: set[str] = set()
+    for item in iter_subscriptions(payload):
+        url = str(item.get("url") or "").rstrip("/")
+        if url and url != wanted and url not in seen:
+            seen.add(url)
+            extras.append(url)
+    return extras
 
 
 def iter_subscriptions(payload: dict[str, Any]) -> list[dict[str, Any]]:

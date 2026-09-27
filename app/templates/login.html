@@ -4,10 +4,10 @@
   <a class="back-link" href="/">{{ icon('back') }} На главную</a>
   <img class="welcome-mascot" src="/static/favicon.png" width="86" height="86" alt="Картыч">
   {% if wait_token %}
-  <div id="max-wait" data-token="{{ wait_token }}" data-max-login="1">
+  <div id="max-wait" data-token="{{ wait_token }}" data-max-url="{{ max_url }}" data-max-login="1">
     <h1>Подтверди в MAX</h1>
-    <p class="muted">Откроется бот. Нажми «Начать» — и вернись сюда.</p>
-    <a class="btn full" href="{{ max_url }}" target="_blank" rel="noreferrer">Открыть MAX →</a>
+    <p class="muted">MAX откроется сам. В боте нажми «Начать» — и вернись сюда. Если приложение не открылось, нажми кнопку ниже.</p>
+    <a class="btn full" href="{{ max_url }}">Открыть MAX</a>
     <p class="notice">Жду подтверждение…</p>
   </div>
   {% else %}
@@ -28,7 +28,6 @@
     {% if promo %}<input type="hidden" name="promo" value="{{ promo }}">{% endif %}
     <div class="landing-actions">
       <button class="btn full" type="submit">Войти через MAX</button>
-      <button class="btn secondary full" type="submit">Зарегистрироваться</button>
     </div>
   </form>
   <p class="account-note">Первый вход создаёт аккаунт. Отдельной анкеты нет.</p>

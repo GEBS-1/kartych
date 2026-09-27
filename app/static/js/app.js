@@ -88,8 +88,17 @@ async function scanQr() {
   }
 }
 async function waitMaxLogin() {
-  const token = document.getElementById("max-wait")?.dataset.token;
+  const box = document.getElementById("max-wait");
+  const token = box?.dataset.token;
   if (!token) return;
+  const maxUrl = box.dataset.maxUrl || "";
+  const openedKey = "cup-max-login-opened-" + token;
+  let already = false;
+  try { already = sessionStorage.getItem(openedKey) === "1"; } catch {}
+  if (maxUrl && !already) {
+    try { sessionStorage.setItem(openedKey, "1"); } catch {}
+    window.location.assign(maxUrl);
+  }
   for(let i=0;i<80;i++) {
     try {
       const response = await fetch("/login/status/"+encodeURIComponent(token));
@@ -131,24 +140,16 @@ function filterRows() {
   }
 }
 function addFreeTiles(map) {
+  if (window.L?.Control?.Attribution) L.Control.Attribution.mergeOptions({prefix:false});
+  if (window.L?.Map) L.Map.mergeOptions({attributionControl:false});
   if (window.L?.Icon?.Default) L.Icon.Default.imagePath = "/static/vendor/leaflet/images/";
   const dark = document.documentElement.getAttribute("data-theme") === "dark";
-  const opts = {maxZoom:19, className: dark ? "map-tiles-dark" : ""};
-  const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    ...opts,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  });
-  let switched = false;
-  osm.on("tileerror", () => {
-    if (switched) return;
-    switched = true;
-    map.removeLayer(osm);
-    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
-      ...opts,
-      attribution: "Tiles &copy; Esri"
-    }).addTo(map);
-  });
-  osm.addTo(map);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    minZoom: 8,
+    attribution: "",
+    className: dark ? "map-tiles-dark" : ""
+  }).addTo(map);
 }
 function setupMap() {
   const el = document.getElementById("places-map"), data = document.getElementById("map-data");
@@ -156,7 +157,7 @@ function setupMap() {
   const places = data ? JSON.parse(data.textContent || "[]") : [];
   el.replaceChildren();
   const start = places[0] ? [places[0].lat, places[0].lng] : [55.7558, 37.6173];
-  const map = L.map(el, {scrollWheelZoom:true}).setView(start, places.length ? 13 : 10);
+  const map = L.map(el, {scrollWheelZoom:true, attributionControl:false, minZoom:8, zoomControl:true}).setView(start, places.length ? 13 : 10);
   addFreeTiles(map);
   window.cupMap = map;
   window.cupMapMarkers = places.map(place=>{
@@ -223,16 +224,17 @@ function setupApplyMap() {
   if (!el || !window.L) return;
   const startLat = Number(lat?.value) || 55.7558;
   const startLng = Number(lng?.value) || 37.6173;
-  const map = L.map(el, {scrollWheelZoom:true}).setView([startLat, startLng], lat?.value ? 15 : 10);
+  const map = L.map(el, {scrollWheelZoom:true, attributionControl:false, minZoom:8, zoomControl:true}).setView([startLat, startLng], lat?.value ? 15 : 10);
   addFreeTiles(map);
   setTimeout(()=>map.invalidateSize(), 200);
-  let marker = lat?.value && lng?.value ? L.marker([startLat, startLng]).addTo(map) : null;
+  const pin = () => L.divIcon({className:"map-pin",iconSize:[24,24],iconAnchor:[12,24]});
+  let marker = lat?.value && lng?.value ? L.marker([startLat, startLng], {icon: pin()}).addTo(map) : null;
   const put = (point) => {
     if (!lat || !lng) return;
     lat.value = point.lat.toFixed(6);
     lng.value = point.lng.toFixed(6);
     if (marker) marker.setLatLng(point);
-    else marker = L.marker(point).addTo(map);
+    else marker = L.marker(point, {icon: pin()}).addTo(map);
     map.setView(point, 16);
   };
   map.on("click", event => put(event.latlng));

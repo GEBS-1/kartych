@@ -42,7 +42,13 @@ async def create_all(engine: AsyncEngine) -> None:
             "ALTER TABLE businesses ADD COLUMN director_name VARCHAR(160) DEFAULT ''",
             "ALTER TABLE businesses ADD COLUMN verified_at DATETIME",
             "ALTER TABLE businesses ADD COLUMN website VARCHAR(240) DEFAULT ''",
+            "ALTER TABLE businesses ADD COLUMN org_name VARCHAR(160) DEFAULT ''",
+            "ALTER TABLE businesses ADD COLUMN parent_id VARCHAR(36)",
             "ALTER TABLE businesses ADD COLUMN status VARCHAR(20) DEFAULT 'verified'",
+            "ALTER TABLE challenges ADD COLUMN slug VARCHAR(40) DEFAULT ''",
+            "ALTER TABLE challenges ADD COLUMN kind VARCHAR(40) DEFAULT 'visits'",
+            "ALTER TABLE customers ADD COLUMN referral_code VARCHAR(16) DEFAULT ''",
+            "ALTER TABLE customers ADD COLUMN referred_by INTEGER",
             "ALTER TABLE loyalty_programs ADD COLUMN qty_required INTEGER DEFAULT 0",
             "ALTER TABLE loyalty_programs ADD COLUMN amount_required INTEGER DEFAULT 0",
             "ALTER TABLE loyalty_programs ADD COLUMN product_id VARCHAR(36)",
@@ -78,7 +84,6 @@ async def seed_demo_shops(session: AsyncSession) -> None:
         ("Зерно", "Точка на Ленина", "Москва"),
         ("Молоко и мёд", "Маркет 12", "Казань"),
         ("Седьмая чашка", "Студия", "Санкт-Петербург"),
-        ("Кофейня на углу", "Моя точка", "Москва"),
     ):
         row = await session.scalar(select(Business).where(Business.name == old_name))
         if row is not None:
@@ -141,12 +146,22 @@ async def seed_demo_shops(session: AsyncSession) -> None:
         elif not shop.address:
             shop.address = address
             shop.city = city
+        if not shop.org_name:
+            shop.org_name = shop.name
         shop.status = "verified"
         if shop.verified_at is None:
             shop.verified_at = datetime.now(UTC)
         loc = await session.get(BusinessLocation, shop.id)
         if loc is None:
             session.add(BusinessLocation(business_id=shop.id, latitude=lat, longitude=lng))
+    orphan = await session.scalar(
+        select(Business).where(
+            Business.name == "Моя точка", Business.owner_max_user_id.is_(None)
+        )
+    )
+    if orphan is not None:
+        orphan.name = "Кофейня на Арбате"
+        orphan.org_name = orphan.org_name or "Кофейня на Арбате"
     shops = (await session.scalars(select(Business))).all()
     for shop in shops:
         products = await session.scalar(

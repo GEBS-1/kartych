@@ -4,13 +4,14 @@ const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 const source = readFileSync('app/static/js/max-auth.js', 'utf8');
 
-function harness({ hash = '', cookie = true, role = '' } = {}) {
+function harness({ hash = '', cookie = true, role = '', pathname = '/me', search = '', isAdmin = false } = {}) {
   const calls = [], redirects = [], timers = [];
   const status = {}, toast = {};
-  const window = { location: { hash, replace: url => redirects.push(url) }, addEventListener() {} };
+  const window = { location: { hash, search, pathname, replace: url => redirects.push(url) }, addEventListener() {} };
   const context = {
     window, URLSearchParams,
-    document: { body: { dataset: { role } }, documentElement: { classList: { add() {} } }, querySelector: () => status, getElementById: () => toast },
+    document: { body: { dataset: { role, cabinet: role === 'business' ? 'biz' : 'guest', canEarn: role === 'business' ? '1' : '', canScan: role === 'business' ? '1' : '', isAdmin: isAdmin ? '1' : '' } }, documentElement: { classList: { add() {} } }, querySelector: () => status, getElementById: () => toast },
+    sessionStorage: { setItem() { throw new Error('Storage unavailable'); } },
     sessionStorage: { setItem() { throw new Error('Storage unavailable'); } },
     fetch: async (url, options) => {
       calls.push({ url, options });
@@ -53,6 +54,67 @@ test('late SDK initialization is retried', async () => {
 
 test('existing authenticated page stays open', async () => {
   const state = harness({ hash: '#WebAppData=signed', role: 'business' });
+  await settle();
+  assert.equal(state.calls.length, 0);
+  assert.deepEqual(state.redirects, []);
+});
+
+test('launcher with session opens purchase QR from bot payload', async () => {
+  const state = harness({
+    hash: '#WebAppData=' + encodeURIComponent('start_param=qr&hash=x'),
+    role: 'business',
+    pathname: '/app',
+  });
+  await settle();
+  assert.equal(state.calls.length, 0);
+  assert.deepEqual(state.redirects, ['/biz/scan']);
+});
+
+test('guest launcher opens personal QR from bot payload', async () => {
+  const state = harness({
+    hash: '#WebAppData=' + encodeURIComponent('start_param=qr&hash=x'),
+    role: 'client',
+    pathname: '/app',
+  });
+  await settle();
+  assert.deepEqual(state.redirects, ['/me/qr']);
+});
+
+test('launcher startapp query opens purchase QR', async () => {
+  const state = harness({
+    role: 'business',
+    pathname: '/app',
+    search: '?startapp=qr',
+  });
+  await settle();
+  assert.equal(state.calls.length, 0);
+  assert.deepEqual(state.redirects, ['/biz/scan']);
+});
+
+test('authenticated mini-app on site root opens cabinet', async () => {
+  const state = harness({
+    hash: '#WebAppData=' + encodeURIComponent('start_param=cabinet&hash=x'),
+    role: 'client',
+    pathname: '/',
+  });
+  await settle();
+  assert.equal(state.calls.length, 0);
+  assert.deepEqual(state.redirects, ['/me']);
+});
+
+test('admin launcher opens review queue', async () => {
+  const state = harness({
+    hash: '#WebAppData=' + encodeURIComponent('start_param=admin&hash=x'),
+    role: 'client',
+    pathname: '/',
+    isAdmin: true,
+  });
+  await settle();
+  assert.deepEqual(state.redirects, ['/admin']);
+});
+
+test('browser landing stays open without MAX webapp', async () => {
+  const state = harness({ role: 'client', pathname: '/' });
   await settle();
   assert.equal(state.calls.length, 0);
   assert.deepEqual(state.redirects, []);

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     letsencrypt_email: str = "you@example.com"
     max_ssl_verify: bool = True
     admin_max_user_ids: str = ""
+    telegram_bot_token: str = ""
+    telegram_bot_username: str = ""
+    telegram_chat_ids: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -60,6 +63,18 @@ class Settings(BaseSettings):
     def admin_ids(self) -> set[int]:
         ids: set[int] = set()
         for item in self.admin_max_user_ids.replace(";", ",").split(","):
+            chunk = item.strip()
+            if not chunk:
+                continue
+            try:
+                ids.add(int(chunk))
+            except ValueError:
+                continue
+        return ids
+
+    def telegram_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for item in self.telegram_chat_ids.replace(";", ",").split(","):
             chunk = item.strip()
             if not chunk:
                 continue

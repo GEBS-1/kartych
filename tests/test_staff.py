@@ -9,6 +9,7 @@ def test_guest_qr_page(client) -> None:
     assert page.status_code == 200
     assert "cupuser:-11:" in page.text
     assert "Мой QR" in page.text
+    assert "Создавать QR не нужно" in page.text
 
 
 def test_staff_invite_scan_and_charge(client, app) -> None:
@@ -56,9 +57,15 @@ def test_staff_invite_scan_and_charge(client, app) -> None:
     assert scanned.status_code == 200
     assert body["ok"] is True
     assert body["next"] == "/biz/charge/99"
+    assert "базе" in body["message"].lower()
     form = client.get("/biz/charge/99")
     assert form.status_code == 200
     assert "Гость" in form.text
+    assert "в базе" in form.text.lower()
+    clients = client.get("/biz/clients")
+    assert clients.status_code == 200
+    assert "Гость" in clients.text
+    assert "/biz/charge/99" in clients.text
     charged = client.post(
         "/biz/charge/99",
         data={"program_id": "", "items": "Кофе", "qty": 1, "amount_rub": 180, "place": "Касса"},

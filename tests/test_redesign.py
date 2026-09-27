@@ -35,7 +35,16 @@ def test_new_pages_and_navigation(client):
     shops = client.get("/me/shops")
     assert "/static/vendor/leaflet/leaflet.min.js" in shops.text
     assert "cartocdn" not in shops.text
-    assert client.get("/static/vendor/leaflet/leaflet.min.js").status_code == 200
+    js = client.get("/static/js/app.js").text
+    assert "arcgisonline" not in js
+    assert "attributionControl:false" in js.replace(" ", "")
+    assert "prefix:false" in js.replace(" ", "")
+    assert "cup-max-login-opened" in js
+    assert "location.assign" in js
+    leaflet = client.get("/static/vendor/leaflet/leaflet.min.js").text
+    assert "leaflet-attribution-flag" not in leaflet
+    assert "#4C7BE1" not in leaflet
+    assert "prefix:false" in leaflet
     sign_in(client, "business")
     for path in [
         "/biz",
@@ -235,3 +244,62 @@ def test_negative_receipt_rejected(client):
     sign_in(client, "business")
     assert client.post("/biz/earn", data={"amount_rub": -1}).status_code == 422
     assert client.post("/biz/earn", data={"qty": 0}).status_code == 422
+
+
+def test_catalog_game_and_rename_keeps_one_point(client, app):
+    sign_in(client, "business")
+    promo = client.get("/biz/promos")
+    assert "Приветственный бонус" in promo.text
+    assert "Колесо удачи" in promo.text
+    assert "Приведи друга" in promo.text
+    assert client.post("/biz/games/catalog", data={"slug": "welcome"}).status_code == 200
+    assert "Приветственный бонус" in client.get("/biz/promos").text
+
+    async def owned():
+        async with app.state.session_factory() as session:
+            rows = (
+                await session.scalars(select(Business).where(Business.owner_max_user_id == -22))
+            ).all()
+            return [(row.id, row.name, row.parent_id) for row in rows]
+
+    before = client.portal.call(owned)
+    assert len(before) == 1
+    assert (
+        client.post(
+            "/biz/setup",
+            data={"name": "Северная", "city": "Москва", "org_name": "Сеть Зёрна"},
+        ).status_code
+        == 200
+    )
+    after_rename = client.portal.call(owned)
+    assert len(after_rename) == 1
+    assert after_rename[0][1] == "Северная"
+    assert (
+        client.post(
+            "/biz/point",
+            data={"name": "Филиал", "city": "Казань", "address": "Баумана, 1"},
+        ).status_code
+        == 200
+    )
+    after_add = client.portal.call(owned)
+    assert len(after_add) == 2
+    assert {row[1] for row in after_add} == {"Северная", "Филиал"}
+    assert (
+        client.post(
+            "/biz/setup",
+            data={"name": "Северная", "city": "Москва", "org_name": "Сеть Зёрна"},
+        ).status_code
+        == 200
+    )
+    assert len(client.portal.call(owned)) == 2
+
+
+def test_bot_qr_start_opens_scan_for_business(client):
+    sign_in(client, "business")
+    response = client.get("/app?start=qr", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/biz/scan"
+    home = client.get("/app?start=home", follow_redirects=False)
+    assert home.headers["location"] == "/biz"
+    smart = client.get("/qr", follow_redirects=False)
+    assert smart.headers["location"] == "/biz/scan"

@@ -170,7 +170,7 @@ def app_launch_keyboard(
     client: MaxClient,
     bot: dict[str, Any] | None = None,
     *,
-    payload: str = "home",
+    payload: str = "cabinet",
     label: str = "Открыть",
 ) -> list[dict[str, Any]]:
     return launch_app_keyboard(
@@ -299,7 +299,7 @@ async def handle_message_created(
         _pending[user_id] = "scan"
         await client.send_message(
             user_id=user_id,
-            text="Нажми кнопку ниже — откроется камера. Можно и прислать QR сюда.",
+            text="Открой камеру в Картыче. Можно и прислать QR сюда.",
             attachments=app_launch_keyboard(client, bot, payload="scan", label="Камера"),
         )
         return
@@ -374,7 +374,7 @@ async def handle_message_callback(
         _pending[user_id] = "scan"
         await client.send_message(
             user_id=user_id,
-            text="Нажми кнопку ниже — откроется камера. Можно и прислать QR сюда.",
+            text="Открой камеру в Картыче. Можно и прислать QR сюда.",
             attachments=app_launch_keyboard(client, bot, payload="scan", label="Камера"),
         )
         return
@@ -389,12 +389,20 @@ async def handle_message_callback(
             ),
         )
         return
-    if payload == "openapp":
-        await ack("Приложение")
+    if payload in {"openapp", "cabinet"}:
+        await ack("Кабинет")
         await client.send_message(
             user_id=user_id,
-            text="Нажми кнопку ниже — откроется кабинет.",
-            attachments=app_launch_keyboard(client, bot, payload="home", label="Кабинет"),
+            text="Кабинет Картыча.",
+            attachments=app_launch_keyboard(client, bot, payload="cabinet", label="Кабинет"),
+        )
+        return
+    if payload == "admin":
+        await ack("Заявки")
+        await client.send_message(
+            user_id=user_id,
+            text="Открой заявки и подтверди точку.",
+            attachments=app_launch_keyboard(client, bot, payload="admin", label="Открыть заявку"),
         )
         return
     if payload == "help":

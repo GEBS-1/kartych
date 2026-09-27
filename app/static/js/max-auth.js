@@ -10,6 +10,57 @@
     const values = params.getAll("WebAppData");
     return values.length === 1 ? values[0] : "";
   }
+  function inMaxWebApp() {
+    try {
+      if (typeof window.WebApp?.initData === "string" && window.WebApp.initData) return true;
+      if (window.WebApp?.initDataUnsafe?.user) return true;
+    } catch {}
+    const hash = window.location.hash || "";
+    if (hash.includes("WebAppData")) return true;
+    const query = new URLSearchParams(window.location.search || "");
+    return Boolean(query.get("WebAppStartParam") || query.get("startapp") || query.get("start"));
+  }
+  function onLauncher() {
+    const path = window.location.pathname || "";
+    if (path === "/app" || path === "/app/") return true;
+    if ((path === "/" || path === "") && inMaxWebApp()) return true;
+    return false;
+  }
+  function startParam() {
+    try {
+      const fromBridge = window.WebApp?.initDataUnsafe?.start_param;
+      if (fromBridge) return String(fromBridge);
+    } catch {}
+    const raw = launchData();
+    if (raw) {
+      const fromLaunch = new URLSearchParams(raw).get("start_param");
+      if (fromLaunch) return fromLaunch;
+    }
+    const query = new URLSearchParams(window.location.search || "");
+    return query.get("start") || query.get("startapp") || query.get("WebAppStartParam") || "";
+  }
+  function liveBiz() {
+    const ds = document.body.dataset || {};
+    return ds.canEarn === "1" || ds.role === "business";
+  }
+  function nextPath(param, live) {
+    const start = String(param || "").trim();
+    if (start.startsWith("s_")) return "/biz/scan";
+    if (start.startsWith("p_")) return "/me/qr";
+    const key = start.toLowerCase();
+    const canScan = (document.body.dataset || {}).canScan === "1";
+    if (key === "admin" || key === "review") {
+      return (document.body.dataset || {}).isAdmin === "1" ? "/admin" : "/me";
+    }
+    if (key === "qr" || key === "showqr" || key.endsWith("qr")) {
+      return canScan ? "/biz/scan" : "/me/qr";
+    }
+    if (key === "scan" || key.endsWith("scan")) return live ? "/biz/scan" : "/me/scan";
+    if (key === "cabinet" || key === "home" || key === "openapp" || key === "lk" || key === "me" || !key) {
+      return live ? "/biz" : "/me";
+    }
+    return live ? "/biz" : "/me";
+  }
   function showError(message) {
     const status = document.querySelector("#cabinet .muted");
     if (status) status.textContent = message;
@@ -18,15 +69,23 @@
   }
   async function boot() {
     if (running || attempted) return;
+    const path = window.location.pathname || "";
+    const atRoot = path === "/" || path === "";
+    if (document.body.dataset.role && !onLauncher()) {
+      if (!atRoot) attempted = true;
+      return;
+    }
+    if (document.body.dataset.role && onLauncher()) {
+      attempted = true;
+      window.location.replace(nextPath(startParam(), liveBiz()));
+      return;
+    }
     const raw = launchData();
     if (!raw) return;
     running = true;
     document.documentElement.classList.add("miniapp");
     try { sessionStorage.setItem("cup-miniapp", "1"); } catch {}
     try { window.WebApp?.ready?.(); } catch {}
-    // A successful session is already rendered on cabinet pages. Reauthenticate
-    // the entry screen when cookies were lost, using fresh signed launch data.
-    if (document.body.dataset.role) { attempted = true; running = false; return; }
     try {
       const response = await fetch("/app/auth", {
         method: "POST", credentials: "include",
@@ -45,14 +104,8 @@
         showError("Это окно блокирует сохранение входа. Открой мини-приложение кнопкой в MAX или разреши cookie для сайта.");
         return;
       }
-      const param = data.start_param || "";
-      let next = "/me";
-      if (param.startsWith("s_")) next = "/biz/scan";
-      else if (param.startsWith("p_")) next = "/me/qr";
-      else if (data.role === "business") next = "/biz";
-      else if (param.endsWith("scan")) next = "/me/scan";
-      else if (param.endsWith("qr")) next = "/me/qr";
-      window.location.replace(next);
+      const live = data.role === "business" || document.body.dataset.canEarn === "1";
+      window.location.replace(data.next || nextPath(data.start_param || startParam(), live));
     } catch {
       showError("Не удалось восстановить вход. Проверяем соединение…");
     } finally { running = false; }
@@ -65,6 +118,6 @@
     boot();
   }, 250);
   window.addEventListener("pageshow", () => {
-    if (!document.body.dataset.role) { attempted = false; boot(); }
+    if (!document.body.dataset.role || onLauncher()) { attempted = false; boot(); }
   });
 })();

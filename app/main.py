@@ -76,6 +76,12 @@ async def lifespan(app: FastAPI):
 
     factory = create_session_factory(engine)
     app.state.session_factory = factory
+    from app.web.max_login import tickets, tickets_path_for
+
+    store = tickets_path_for(settings.database_url)
+    if store is not None:
+        tickets.configure(store)
+        log.info("login tickets store: %s", store)
     async with factory() as session:
         await _optional(seed_demo_shops(session), "seed_shops")
     redis = create_redis(settings) if settings.redis_url else None

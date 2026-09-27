@@ -67,6 +67,8 @@ class Business(Base):
     inn: Mapped[str] = mapped_column(String(12), default="")
     director_name: Mapped[str] = mapped_column(String(160), default="")
     website: Mapped[str] = mapped_column(String(240), default="")
+    org_name: Mapped[str] = mapped_column(String(160), default="")
+    parent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -123,6 +125,8 @@ class Customer(Base):
     display_name: Mapped[str] = mapped_column(String(160), default="")
     username: Mapped[str | None] = mapped_column(String(160), nullable=True)
     bonus: Mapped[int] = mapped_column(Integer, default=0)
+    referral_code: Mapped[str] = mapped_column(String(16), default="")
+    referred_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -199,6 +203,8 @@ class Challenge(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
     business_id: Mapped[str] = mapped_column(ForeignKey("businesses.id"), index=True)
     title: Mapped[str] = mapped_column(String(160))
+    slug: Mapped[str] = mapped_column(String(40), default="")
+    kind: Mapped[str] = mapped_column(String(40), default="visits")
     goal: Mapped[int] = mapped_column(Integer)
     reward_bonus: Mapped[int] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -273,5 +279,24 @@ class PlatformAdmin(Base):
     __tablename__ = "platform_admins"
 
     max_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    added_by: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TelegramSetting(Base):
+    __tablename__ = "telegram_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bot_token: Mapped[str] = mapped_column(String(120), default="")
+    bot_username: Mapped[str] = mapped_column(String(80), default="")
+    webhook_secret: Mapped[str] = mapped_column(String(64), default="")
+
+
+class TelegramSubscriber(Base):
+    __tablename__ = "telegram_subscribers"
+
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(160), default="")
+    username: Mapped[str | None] = mapped_column(String(160), nullable=True)
     added_by: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

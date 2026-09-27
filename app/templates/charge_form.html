@@ -1,1 +1,27 @@
-{% extends "site_base.html" %}{% block content %}<p class="eyebrow">{{ shop.name }}</p><header class="page-heading"><h1>Покупка гостя</h1>{{ icon('qr') }}</header><nav class="segments"><a href="/biz/earn">Показать QR</a><a class="active" href="/biz/scan">Считать гостя</a></nav><section class="panel"><h2>{{ guest.display_name }}</h2><p class="muted">Покупка запишется сразу — гостю не нужно ничего сканировать.</p><form method="post" action="/biz/charge/{{ guest.max_user_id }}"><label>Акция<select name="program_id">{% for program in programs %}<option value="{{ program.id }}">{{ program.title }}</option>{% else %}<option value="">Без акции — записать покупку</option>{% endfor %}</select></label><label>Что купили<input name="items" required maxlength="200" value="Покупка"></label><div class="form-grid"><label>Количество<input type="number" name="qty" min="1" max="10000" value="1" required></label><label>Сумма, ₽<input type="number" name="amount_rub" min="0" max="1000000" value="0" required></label></div><label>Место / касса<input name="place" maxlength="200" placeholder="{{ shop.address or shop.name }}"></label><button class="btn full">Записать покупку</button></form></section>{% endblock %}
+{% extends "site_base.html" %}{% block content %}
+<p class="eyebrow">{{ shop.name }}</p>
+<header class="page-heading"><h1>Гость в базе</h1>{{ icon('qr') }}</header>
+<nav class="segments"><a href="/me/qr">Мой QR</a><a class="active" href="/biz/scan">Камера</a></nav>
+<section class="panel">
+  <h2>{{ profile.name }}</h2>
+  <p class="muted">{% if profile.username %}@{{ profile.username }} · {% endif %}{{ profile.visits }} визитов · {{ profile.bonus }} баллов · {{ profile.last }}</p>
+  {% if profile.promos %}
+  <ul class="muted">{% for promo in profile.promos %}<li>{{ promo.title }}: {{ promo.current }}/{{ promo.goal }}</li>{% endfor %}</ul>
+  {% endif %}
+</section>
+<section class="panel">
+  <h2>Записать покупку</h2>
+  <p class="muted">Покупка сразу попадёт в карту гостя. Ему ничего сканировать не нужно.</p>
+  <form method="post" action="/biz/charge/{{ guest.max_user_id }}">
+    <label>Акция<select name="program_id">{% for program in programs %}<option value="{{ program.id }}">{{ program.title }}</option>{% else %}<option value="">Без акции — записать покупку</option>{% endfor %}</select></label>
+    <label>Что купили<input name="items" required maxlength="200" value="Покупка"></label>
+    <div class="form-grid">
+      <label>Количество<input type="number" name="qty" min="1" max="10000" value="1" required></label>
+      <label>Сумма, ₽<input type="number" name="amount_rub" min="0" max="1000000" value="0" required></label>
+    </div>
+    <label>Место / касса<input name="place" maxlength="200" placeholder="{{ shop.address or shop.name }}"></label>
+    <button class="btn full">Записать покупку</button>
+  </form>
+</section>
+<p class="footnote"><a class="text-link" href="/biz/clients">Все гости точки</a></p>
+{% endblock %}

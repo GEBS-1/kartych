@@ -15,6 +15,13 @@ def link_button(text: str, url: str) -> dict[str, Any]:
     return {"type": "link", "text": text, "url": url}
 
 
+def miniapp_startapp_url(bot_username: str, payload: str = "") -> str:
+    bot = bot_username.lstrip("@")
+    if payload:
+        return f"https://max.ru/{bot}?startapp={payload}"
+    return f"https://max.ru/{bot}?startapp"
+
+
 def open_app_button(
     text: str,
     *,
@@ -39,12 +46,21 @@ def home_keyboard(
     miniapp_url: str = "",
     business: bool = False,
 ) -> list[dict[str, Any]]:
-    rows = [
-        [callback_button("Показать QR", "showqr")],
-    ]
+    def app_btn(text: str, payload: str) -> dict[str, Any]:
+        if bot_username or bot_user_id:
+            return open_app_button(
+                text,
+                web_app=bot_username or None,
+                contact_id=bot_user_id,
+                payload=payload,
+            )
+        fallback = {"qr": "showqr", "cabinet": "openapp", "home": "openapp", "scan": "scan"}
+        return callback_button(text, fallback.get(payload, payload))
+
+    rows = [[app_btn("Показать QR", "qr")]]
     if business:
-        rows.append([callback_button("Сканировать QR", "scan")])
-    rows.append([callback_button("Открыть кабинет", "openapp")])
+        rows.append([app_btn("Сканировать QR", "scan")])
+    rows.append([app_btn("Открыть кабинет", "cabinet")])
     rows.append([callback_button("Поддержка", "help")])
     return [inline_keyboard(rows)]
 
@@ -53,25 +69,19 @@ def launch_app_keyboard(
     *,
     bot_username: str = "",
     bot_user_id: int | None = None,
-    payload: str = "home",
+    payload: str = "cabinet",
     label: str = "Открыть",
 ) -> list[dict[str, Any]]:
-    if not bot_username and bot_user_id is None:
-        return home_keyboard()
-    return [
-        inline_keyboard(
-            [
-                [
-                    open_app_button(
-                        label,
-                        web_app=bot_username or None,
-                        contact_id=bot_user_id,
-                        payload=payload,
-                    )
-                ]
-            ]
+    if bot_username or bot_user_id is not None:
+        button = open_app_button(
+            label,
+            web_app=bot_username or None,
+            contact_id=bot_user_id,
+            payload=payload,
         )
-    ]
+    else:
+        return home_keyboard()
+    return [inline_keyboard([[button]])]
 
 
 def client_keyboard(client: Any | None = None, bot: dict[str, Any] | None = None) -> list[dict[str, Any]]:

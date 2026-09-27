@@ -17,6 +17,7 @@ from app.db.models import (
     AppUser,
     Business,
     BusinessLocation,
+    Challenge,
     Customer,
     LoyaltyProgram,
     PlatformAdmin,
@@ -25,6 +26,8 @@ from app.db.models import (
     PromoLink,
     ShopInvite,
     ShopStaff,
+    TelegramSetting,
+    TelegramSubscriber,
     Ticket,
     TicketKind,
     UserRole,
@@ -265,8 +268,61 @@ async def get_or_create_user(
     return user
 
 
+async def owner_shops(session: AsyncSession, max_user_id: int) -> list[Business]:
+    rows = (
+        await session.scalars(
+            select(Business)
+            .where(Business.owner_max_user_id == max_user_id)
+            .order_by(Business.created_at)
+        )
+    ).all()
+    return list(rows)
+
+
+async def consolidate_owner_network(session: AsyncSession, max_user_id: int) -> None:
+    rows = await owner_shops(session, max_user_id)
+    if not rows:
+        return
+    hq = next((row for row in rows if not row.parent_id), rows[0])
+    hq.parent_id = None
+    if not (hq.org_name or "").strip():
+        hq.org_name = hq.name
+    for row in rows:
+        if row.id == hq.id:
+            continue
+        row.parent_id = hq.id
+        if not (row.org_name or "").strip():
+            row.org_name = hq.org_name
+        if not row.inn:
+            row.inn = hq.inn
+        if not row.website:
+            row.website = hq.website
+        if not row.director_name:
+            row.director_name = hq.director_name
+
+
 async def shop_for_owner(session: AsyncSession, max_user_id: int) -> Business | None:
-    return await session.scalar(select(Business).where(Business.owner_max_user_id == max_user_id))
+    await consolidate_owner_network(session, max_user_id)
+    return await session.scalar(
+        select(Business)
+        .where(Business.owner_max_user_id == max_user_id, Business.parent_id.is_(None))
+        .order_by(Business.created_at)
+        .limit(1)
+    )
+
+
+async def points_for_owner(session: AsyncSession, max_user_id: int) -> list[Business]:
+    hq = await shop_for_owner(session, max_user_id)
+    if hq is None:
+        return []
+    children = list(
+        (
+            await session.scalars(
+                select(Business).where(Business.parent_id == hq.id).order_by(Business.created_at)
+            )
+        ).all()
+    )
+    return [hq, *children]
 
 
 async def staff_for(session: AsyncSession, max_user_id: int) -> ShopStaff | None:
@@ -276,16 +332,14 @@ async def staff_for(session: AsyncSession, max_user_id: int) -> ShopStaff | None
 async def ensure_owner_staff(session: AsyncSession, shop: Business) -> None:
     if shop.owner_max_user_id is None:
         return
+    hq_id = shop.parent_id or shop.id
     row = await session.scalar(
-        select(ShopStaff).where(
-            ShopStaff.business_id == shop.id,
-            ShopStaff.max_user_id == shop.owner_max_user_id,
-        )
+        select(ShopStaff).where(ShopStaff.max_user_id == shop.owner_max_user_id)
     )
     if row is None:
         session.add(
             ShopStaff(
-                business_id=shop.id,
+                business_id=hq_id,
                 max_user_id=shop.owner_max_user_id,
                 kind="owner",
                 can_stats=True,
@@ -296,6 +350,7 @@ async def ensure_owner_staff(session: AsyncSession, shop: Business) -> None:
         )
         await session.flush()
         return
+    row.business_id = hq_id
     row.kind = "owner"
     row.can_stats = True
     row.can_earn = True
@@ -303,17 +358,24 @@ async def ensure_owner_staff(session: AsyncSession, shop: Business) -> None:
     row.can_edit = True
 
 
-async def shop_for_member(session: AsyncSession, max_user_id: int) -> Business | None:
+async def shop_for_member(
+    session: AsyncSession, max_user_id: int, preferred_id: str | None = None
+) -> Business | None:
     staff = await staff_for(session, max_user_id)
-    if staff is not None:
+    if staff is not None and staff.kind != "owner":
         shop = await session.get(Business, staff.business_id)
         if shop is not None:
-            await ensure_owner_staff(session, shop)
             return shop
-    shop = await shop_for_owner(session, max_user_id)
-    if shop is not None:
-        await ensure_owner_staff(session, shop)
-    return shop
+    points = await points_for_owner(session, max_user_id)
+    if not points:
+        return None
+    hq = points[0]
+    await ensure_owner_staff(session, hq)
+    if preferred_id:
+        for point in points:
+            if point.id == preferred_id:
+                return point
+    return hq
 
 
 async def is_shop_member(session: AsyncSession, user: AppUser, shop: Business) -> bool:
@@ -386,12 +448,15 @@ async def create_shop(
             existing.verified_at = existing.verified_at or datetime.now(UTC)
             owner.role = UserRole.BUSINESS.value
         await ensure_owner_staff(session, existing)
+        if not (existing.org_name or "").strip():
+            existing.org_name = existing.name
         return existing
     shop = Business(
         name=name.strip() or "Моя точка",
         city=city.strip(),
         category="shop",
         owner_max_user_id=owner.max_user_id,
+        org_name=name.strip() or "Моя точка",
         status="verified" if verified else "pending",
         verified_at=datetime.now(UTC) if verified else None,
     )
@@ -413,6 +478,139 @@ async def create_shop(
             owner.role = UserRole.CLIENT.value
     await ensure_owner_staff(session, shop)
     return shop
+
+
+async def network_ids_for(session: AsyncSession, shop: Business) -> list[str]:
+    hq_id = shop.parent_id or shop.id
+    children = list(
+        (await session.scalars(select(Business.id).where(Business.parent_id == hq_id))).all()
+    )
+    return [hq_id, *children]
+
+
+async def add_network_point(
+    session: AsyncSession,
+    hq: Business,
+    *,
+    name: str,
+    city: str,
+    address: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> Business:
+    program = await active_program(session, hq.id)
+    point = Business(
+        name=name.strip() or "Новая точка",
+        city=city.strip() or hq.city,
+        address=address.strip(),
+        category=hq.category or "shop",
+        owner_max_user_id=hq.owner_max_user_id,
+        inn=hq.inn,
+        director_name=hq.director_name,
+        website=hq.website,
+        org_name=hq.org_name or hq.name,
+        parent_id=hq.id,
+        status=hq.status,
+        verified_at=hq.verified_at,
+    )
+    session.add(point)
+    await session.flush()
+    stamps = program.stamps_required if program is not None else 5
+    reward = program.reward_title if program is not None else "Подарок"
+    session.add(
+        LoyaltyProgram(
+            business_id=point.id,
+            kind="visits",
+            title=f"{stamps} визитов — подарок",
+            stamps_required=stamps,
+            reward_title=reward,
+            reward_bonus=program.reward_bonus if program is not None else 0,
+        )
+    )
+    if latitude is not None and longitude is not None:
+        await save_shop_location(session, point, latitude, longitude)
+    return point
+
+
+GAME_CATALOG = (
+    {
+        "slug": "welcome",
+        "title": "Приветственный бонус",
+        "blurb": "Баллы за первый визит — гость сразу чувствует заботу.",
+        "rule": "1 визит",
+        "icon": "gift",
+        "kind": "visits",
+        "goal": 1,
+        "bonus": 50,
+    },
+    {
+        "slug": "stamps",
+        "title": "Карта штампов",
+        "blurb": "Пять походов — и награда сама падает на карту.",
+        "rule": "5 визитов",
+        "icon": "cards",
+        "kind": "visits",
+        "goal": 5,
+        "bonus": 80,
+    },
+    {
+        "slug": "weekend",
+        "title": "Любимый гость",
+        "blurb": "Длинная серия для тех, кто ходит к вам постоянно.",
+        "rule": "10 визитов",
+        "icon": "trophy",
+        "kind": "visits",
+        "goal": 10,
+        "bonus": 150,
+    },
+    {
+        "slug": "wheel",
+        "title": "Колесо удачи",
+        "blurb": "После визита гость крутит колесо и ловит случайные баллы.",
+        "rule": "случайный приз",
+        "icon": "game",
+        "kind": "wheel",
+        "goal": 1,
+        "bonus": 100,
+    },
+    {
+        "slug": "invite",
+        "title": "Приведи друга",
+        "blurb": "Гость зовёт своего — баллы получают оба.",
+        "rule": "1 друг",
+        "icon": "users",
+        "kind": "referral",
+        "goal": 1,
+        "bonus": 60,
+    },
+)
+
+
+async def install_catalog_game(session: AsyncSession, shop: Business, slug: str) -> Challenge | None:
+    spec = next((item for item in GAME_CATALOG if item["slug"] == slug), None)
+    if spec is None:
+        return None
+    existing = await session.scalar(
+        select(Challenge).where(Challenge.business_id == shop.id, Challenge.slug == slug)
+    )
+    if existing is not None:
+        existing.is_active = True
+        existing.title = spec["title"]
+        existing.kind = spec["kind"]
+        existing.goal = spec["goal"]
+        existing.reward_bonus = spec["bonus"]
+        return existing
+    game = Challenge(
+        business_id=shop.id,
+        title=spec["title"],
+        slug=spec["slug"],
+        kind=spec["kind"],
+        goal=spec["goal"],
+        reward_bonus=spec["bonus"],
+    )
+    session.add(game)
+    await session.flush()
+    return game
 
 
 async def visit_count(session: AsyncSession, customer_id: str, program_id: str) -> int:
@@ -445,12 +643,19 @@ async def progress_for(session: AsyncSession, customer_id: str, program: Loyalty
     return visits + len(receipts)
 
 
-async def ensure_customer(session: AsyncSession, shop: Business, user: AppUser) -> Customer:
+async def ensure_customer(
+    session: AsyncSession,
+    shop: Business,
+    user: AppUser,
+    *,
+    referral_code: str = "",
+) -> Customer:
     customer = await session.scalar(
         select(Customer).where(
             Customer.business_id == shop.id, Customer.max_user_id == user.max_user_id
         )
     )
+    created = customer is None
     if customer is None:
         customer = Customer(
             business_id=shop.id,
@@ -461,7 +666,72 @@ async def ensure_customer(session: AsyncSession, shop: Business, user: AppUser) 
         )
         session.add(customer)
         await session.flush()
+    if not customer.referral_code:
+        for _ in range(8):
+            code = secrets.token_hex(3)
+            taken = await session.scalar(select(Customer.id).where(Customer.referral_code == code))
+            if taken is None:
+                customer.referral_code = code
+                break
+    code = (referral_code or "").strip().lower()
+    if created and code and customer.referred_by is None:
+        referrer = await session.scalar(
+            select(Customer).where(
+                Customer.business_id == shop.id, Customer.referral_code == code
+            )
+        )
+        if referrer is not None and referrer.max_user_id != user.max_user_id:
+            customer.referred_by = referrer.max_user_id
     return customer
+
+
+async def guest_shop_profile(
+    session: AsyncSession, shop: Business, guest: AppUser
+) -> dict[str, Any]:
+    customer = await ensure_customer(session, shop, guest)
+    if guest.display_name:
+        customer.display_name = guest.display_name
+    if guest.username:
+        customer.username = guest.username
+    programs = await shop_programs(session, shop.id)
+    receipts = (
+        await session.scalars(
+            select(Receipt)
+            .where(Receipt.customer_id == customer.id, Receipt.kind == "earn")
+            .order_by(Receipt.created_at.desc())
+        )
+    ).all()
+    visits = (
+        await session.scalars(
+            select(Visit)
+            .where(Visit.customer_id == customer.id)
+            .order_by(Visit.created_at.desc())
+        )
+    ).all()
+    last_at = receipts[0].created_at if receipts else (visits[0].created_at if visits else None)
+    if last_at is not None and last_at.tzinfo is None:
+        last_at = last_at.replace(tzinfo=UTC)
+    promo_rows = []
+    for program in programs:
+        current = await progress_for(session, customer.id, program)
+        promo_rows.append(
+            {
+                "title": program.title,
+                "current": current,
+                "goal": promo_goal(program),
+                "rule": promo_rule(program),
+            }
+        )
+    return {
+        "customer_id": customer.id,
+        "name": customer.display_name or guest.display_name or "Гость",
+        "username": customer.username or guest.username or "",
+        "bonus": customer.bonus,
+        "purchases": len(receipts),
+        "visits": len(receipts) or len(visits),
+        "last": last_at.strftime("%d.%m.%Y %H:%M") if last_at else "Ещё без покупок",
+        "promos": promo_rows,
+    }
 
 
 async def client_cards(session: AsyncSession, max_user_id: int) -> list[dict[str, Any]]:
@@ -881,9 +1151,10 @@ async def apply_scan(
                 ok=False, message="Гость ещё не заходил в Картыч. Пусть откроет приложение."
             )
         name = guest.display_name or "Гость"
+        await guest_shop_profile(session, shop, guest)
         return ScanResult(
             ok=True,
-            message=f"Гость {name}. Запиши покупку.",
+            message=f"Гость {name} найден в базе «{shop.name}».",
             shop=shop.name,
             next_url=f"/biz/charge/{guest_id}",
         )
@@ -1292,6 +1563,7 @@ async def apply_for_business(
     shop.name = name.strip() or shop.name
     shop.city = city.strip()
     shop.address = address.strip()
+    shop.org_name = shop.org_name or shop.name
     shop.inn = inn_digits(inn)
     shop.director_name = director_name.strip()
     shop.website = website.strip()[:240]
@@ -1312,6 +1584,40 @@ async def pending_businesses(session: AsyncSession) -> list[Business]:
         )
     ).all()
     return list(rows)
+
+
+def _shop_search_blob(shop: Business) -> str:
+    return " ".join(
+        part
+        for part in (
+            shop.name,
+            shop.org_name,
+            shop.city,
+            shop.address,
+            shop.website,
+            shop.inn,
+            shop.director_name,
+            shop.category,
+        )
+        if part
+    ).casefold()
+
+
+def _stem_match(shop: Business, needle: str) -> bool:
+    stem = needle.rstrip("аеиоуыэюяйьъ")
+    return len(stem) >= 4 and stem in _shop_search_blob(shop)
+
+
+async def search_businesses(session: AsyncSession, query: str, *, limit: int = 80) -> list[Business]:
+    text = (query or "").strip()
+    if not text:
+        return await pending_businesses(session)
+    needle = text.casefold()
+    rows = (
+        await session.scalars(select(Business).order_by(Business.created_at.desc()))
+    ).all()
+    found = [shop for shop in rows if needle in _shop_search_blob(shop) or _stem_match(shop, needle)]
+    return found[:limit]
 
 
 async def set_shop_review(
@@ -1343,6 +1649,16 @@ async def platform_admin_ids(session: AsyncSession, settings) -> set[int]:
     return set(settings.admin_ids()) | await extra_admin_ids(session)
 
 
+async def claim_first_admin(session: AsyncSession, max_user_id: int, settings) -> tuple[bool, str]:
+    if max_user_id <= 0:
+        return False, "Сначала войди через MAX."
+    if await platform_admin_ids(session, settings):
+        return False, "Админ уже есть. Попроси его добавить тебя в списке."
+    session.add(PlatformAdmin(max_user_id=max_user_id, added_by=max_user_id))
+    await session.flush()
+    return True, "Готово. Это твоя админ-панель. Здесь карточки заявок."
+
+
 async def add_platform_admin(
     session: AsyncSession, max_user_id: int, *, added_by: int, pinned: set[int]
 ) -> tuple[bool, str]:
@@ -1366,3 +1682,82 @@ async def remove_platform_admin(
     await session.delete(row)
     await session.flush()
     return True, "Админ снят."
+
+
+async def get_telegram_config(session: AsyncSession) -> TelegramSetting | None:
+    return await session.get(TelegramSetting, 1)
+
+
+async def telegram_alert_chats(session: AsyncSession, settings) -> set[int]:
+    ids = set(settings.telegram_ids())
+    ids |= set(await session.scalars(select(TelegramSubscriber.chat_id)))
+    return ids
+
+
+async def list_telegram_people(session: AsyncSession, settings) -> list[dict[str, Any]]:
+    pinned = settings.telegram_ids()
+    rows = (await session.scalars(select(TelegramSubscriber).order_by(TelegramSubscriber.created_at.desc()))).all()
+    seen: set[int] = set()
+    people: list[dict[str, Any]] = []
+    for row in rows:
+        seen.add(row.chat_id)
+        handle = f"@{row.username}" if row.username else ""
+        people.append(
+            {
+                "id": row.chat_id,
+                "name": row.display_name or handle or f"Telegram {row.chat_id}",
+                "username": row.username or "",
+                "pinned": row.chat_id in pinned,
+            }
+        )
+    for chat_id in sorted(pinned - seen):
+        people.append({"id": chat_id, "name": f"Telegram {chat_id}", "username": "", "pinned": True})
+    return people
+
+
+async def save_telegram_bot(
+    session: AsyncSession, *, token: str, username: str, webhook_secret: str
+) -> TelegramSetting:
+    row = await session.get(TelegramSetting, 1)
+    if row is None:
+        row = TelegramSetting(id=1)
+        session.add(row)
+    row.bot_token = token
+    row.bot_username = username
+    row.webhook_secret = webhook_secret
+    await session.flush()
+    return row
+
+
+async def add_telegram_subscriber(
+    session: AsyncSession,
+    chat_id: int,
+    *,
+    display_name: str = "",
+    username: str | None = None,
+    added_by: int = 0,
+) -> TelegramSubscriber:
+    row = await session.get(TelegramSubscriber, chat_id)
+    if row is None:
+        row = TelegramSubscriber(chat_id=chat_id, added_by=added_by)
+        session.add(row)
+    row.display_name = (display_name or row.display_name or "").strip()[:160]
+    if username:
+        row.username = username.lstrip("@")[:160]
+    if added_by and not row.added_by:
+        row.added_by = added_by
+    await session.flush()
+    return row
+
+
+async def remove_telegram_subscriber(
+    session: AsyncSession, chat_id: int, *, pinned: set[int]
+) -> tuple[bool, str]:
+    if chat_id in pinned:
+        return False, "Этого человека задали в настройках сервера. Его нельзя снять здесь."
+    row = await session.get(TelegramSubscriber, chat_id)
+    if row is None:
+        return False, "Такого получателя нет в списке."
+    await session.delete(row)
+    await session.flush()
+    return True, "Больше не пишем этому человеку в Telegram."

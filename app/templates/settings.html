@@ -17,7 +17,7 @@
 <a class="list-link" href="/me/league"><span>🏆 Моя лига</span><span>{{ ranking.mine.xp }} XP {{ icon('arrow') }}</span></a>
 {% endif %}
 {% if user.is_admin %}
-<a class="list-link" href="/admin"><span>Заявки бизнеса</span><span>{{ icon('arrow') }}</span></a>
+<a class="list-link" href="/admin"><span>Заявки</span><span>{{ icon('arrow') }}</span></a>
 {% endif %}
 {% if user.is_cashier and shop and not user.guest_view %}
 <section class="panel">
@@ -37,24 +37,54 @@
 </section>
 {% endif %}
 <section class="panel" id="edit-profile">
-  <h2>{{ 'Моя точка' if user.is_owner and not user.guest_view else 'Мой профиль' }}</h2>
+  <h2>{{ 'Сеть и эта точка' if user.is_owner and not user.guest_view else 'Мой профиль' }}</h2>
   <p class="muted">{{ user.display_name }}{% if user.username %} · @{{ user.username }}{% endif %} · MAX {{ user.max_user_id }}</p>
   {% if user.is_owner and not user.guest_view %}
   <form method="post" action="/biz/setup">
-    <label>Название<input name="name" required maxlength="160" value="{{ shop.name if shop else '' }}" placeholder="Кофейня «Зерно»"></label>
+    <label>Организация / сеть<input name="org_name" maxlength="160" value="{{ hq.org_name if hq and hq.org_name else (shop.org_name if shop else '') }}" placeholder="Название сети или ИП"></label>
+    <label>Название этой точки<input name="name" required maxlength="160" value="{{ shop.name if shop else '' }}" placeholder="Точка на Ленина"></label>
     <label>Город<input name="city" maxlength="160" value="{{ shop.city if shop else '' }}" placeholder="Москва"></label>
-    <label>Адрес<input name="address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="Улица и номер дома"></label>
+    <label>Адрес этой точки<input name="address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="Улица и номер дома"></label>
     <label>Сайт организации<input name="website" maxlength="240" value="{{ shop.website if shop else '' }}" placeholder="https://example.ru"></label>
     <label>ИНН организации или ИП<input name="inn" inputmode="numeric" maxlength="12" value="{{ shop.inn if shop else '' }}" placeholder="10 или 12 цифр"></label>
     <label>ФИО руководителя / ИП<input name="director_name" maxlength="160" value="{{ shop.director_name if shop else '' }}" placeholder="Иванов Иван Иванович"></label>
     <details open><summary>Положение на карте</summary>
-      <p class="footnote">Адрес или координаты — чтобы гости находили точку на карте.</p>
+      <p class="footnote">Адрес или координаты — чтобы гости находили именно эту точку. Смена названия не создаёт новую точку.</p>
       <div class="form-grid">
         <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" value="{{ location.latitude if location else '' }}" placeholder="55.7558"></label>
         <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" value="{{ location.longitude if location else '' }}" placeholder="37.6173"></label>
       </div>
     </details>
-    <button class="btn full">Сохранить точку</button>
+    <button class="btn full">Сохранить эту точку</button>
+  </form>
+  {% if points %}
+  <h3>Точки сети</h3>
+  <p class="footnote">Одно устройство работает с одной точкой. Кассир тоже привязан только к своей точке.</p>
+  {% for point in points %}
+  <div class="staff-card">
+    <strong>{{ point.name }}</strong>
+    <p class="muted">{{ point.city }}{% if point.address %} · {{ point.address }}{% endif %}{% if not point.parent_id %} · главная{% endif %}</p>
+    {% if point.id == shop.id %}
+    <p class="badge green">это устройство</p>
+    {% else %}
+    <form method="post" action="/biz/point/use"><input type="hidden" name="shop_id" value="{{ point.id }}"><button class="btn secondary small">Работать с этой точкой</button></form>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+  <form method="post" action="/biz/point">
+    <h3>Добавить точку сети</h3>
+    <p class="muted">Новый адрес той же организации. Название текущей точки не дублируется.</p>
+    <label>Название точки<input name="name" required maxlength="160" placeholder="Точка на Арбате"></label>
+    <div class="form-grid">
+      <label>Город<input name="city" maxlength="160" value="{{ shop.city if shop else '' }}"></label>
+      <label>Адрес<input name="address" maxlength="200" placeholder="улица и дом"></label>
+    </div>
+    <div class="form-grid">
+      <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" placeholder="55.7558"></label>
+      <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" placeholder="37.6173"></label>
+    </div>
+    <button class="btn secondary full">Добавить точку</button>
   </form>
   {% if shop %}<p class="footnote"><a class="text-link" href="/biz/staff">Сотрудники и график кассиров →</a> · <a class="text-link" href="/biz/promos">Акции и игры →</a></p>{% endif %}
   {% endif %}
