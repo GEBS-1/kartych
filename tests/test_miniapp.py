@@ -2,6 +2,8 @@ def test_miniapp_shell(client) -> None:
     response = client.get("/app")
     assert response.status_code == 200
     assert "cabinet" in response.text
+    assert "max-allow" in response.text
+    assert "max-browser" in response.text
 
 
 def test_qr_png(client) -> None:

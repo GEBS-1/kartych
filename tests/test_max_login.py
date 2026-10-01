@@ -17,9 +17,13 @@ def test_login_tickets_survive_reload(tmp_path: Path) -> None:
     first = LoginTickets(store)
     token = first.create(role="client")
     assert first.complete(token, 4242) is True
+    assert first.complete(token, 4242) is True
     again = LoginTickets(store)
     assert again.status(token) == "ok"
     item = again.consume(token)
     assert item is not None
     assert item["user_id"] == 4242
     assert LoginTickets(store).status(token) == "used"
+    replay = LoginTickets(store).consume(token)
+    assert replay is not None
+    assert replay["user_id"] == 4242

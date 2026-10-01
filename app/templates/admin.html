@@ -26,7 +26,7 @@
   <p class="muted">{{ shop.city }}{% if shop.address %} · {{ shop.address }}{% endif %}</p>
   {% if shop.org_name %}<p class="footnote">{{ shop.org_name }}</p>{% endif %}
   {% if shop.website %}<p><a class="text-link" href="{{ shop.website }}" target="_blank" rel="noopener">{{ shop.website }}</a></p>{% endif %}
-  <p class="footnote">ИНН {{ shop.inn or 'нет' }} · {{ shop.director_name or 'без ФИО' }}</p>
+  {% if shop.inn %}<p class="footnote">ИНН {{ shop.inn }}</p>{% endif %}
   {% if locations[shop.id] %}
   <p class="footnote">Карта: {{ '%.5f'|format(locations[shop.id].latitude) }}, {{ '%.5f'|format(locations[shop.id].longitude) }}</p>
   {% else %}

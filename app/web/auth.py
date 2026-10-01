@@ -27,19 +27,31 @@ def site_user_id(name: str) -> int:
     return value
 
 
-def set_session(response: Response, secret: str, max_user_id: int, *, secure: bool = False) -> None:
+def set_session(
+    response: Response,
+    secret: str,
+    max_user_id: int,
+    *,
+    secure: bool = False,
+    partitioned: bool = False,
+) -> None:
     exp = int(time.time()) + TTL
     payload = f"{max_user_id}:{exp}"
+    # Mini-app inside MAX needs SameSite=None + Partitioned. A normal browser
+    # tab is first-party: Lax without Partitioned, otherwise Safari/Firefox
+    # drop the cookie and the person looks "registered" in MAX but logged out
+    # on the website.
+    embedded = bool(secure and partitioned)
     response.set_cookie(
         COOKIE,
         f"{payload}:{_sign(secret, payload)}",
         httponly=True,
         secure=secure,
-        samesite="none" if secure else "lax",
+        samesite="none" if embedded else "lax",
         max_age=TTL,
         path="/",
     )
-    if secure:
+    if embedded:
         # CHIPS allows the HttpOnly session in MAX's embedded web client even
         # when unpartitioned third-party cookies are disabled. Python 3.11's
         # SimpleCookie does not yet expose the Partitioned attribute.

@@ -123,15 +123,23 @@ def message_text_of(update: dict[str, Any]) -> str:
 
 
 def start_payload_of(update: dict[str, Any]) -> str:
-    for key in ("payload", "start_payload", "startPayload"):
-        value = update.get(key)
-        if value:
-            return str(value).strip()
+    message = update.get("message") if isinstance(update.get("message"), dict) else {}
+    body = message.get("body") if isinstance(message.get("body"), dict) else {}
+    for source in (update, message, body):
+        if not isinstance(source, dict):
+            continue
+        for key in ("payload", "start_payload", "startPayload", "start_param", "startParam"):
+            value = source.get(key)
+            if value:
+                return str(value).strip()
     text = message_text_of(update)
-    if text.lower().startswith("/start"):
+    lowered = text.lower()
+    if lowered.startswith("/start"):
         parts = text.split(maxsplit=1)
         if len(parts) == 2:
             return parts[1].strip()
+    if tickets.parse(text) or parse_staff_start(text) or parse_promo_start(text):
+        return text.strip()
     return ""
 
 
@@ -208,39 +216,42 @@ async def dispatch_update(
         log.info("skip update_type=%s", kind)
 
 
-async def handle_bot_started(
+async def apply_deeplink_start(
     client: MaxClient,
     update: dict[str, Any],
     bot: dict[str, Any] | None,
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
-) -> None:
+) -> bool:
     user_id = user_id_of(update)
-    if user_id is None:
-        log.warning("bot_started without user_id: %s", update)
-        return
-    _pending.pop(user_id, None)
+    if user_id is None or session_factory is None:
+        return False
+    payload = start_payload_of(update)
+    if not payload:
+        return False
     name = display_name_of(update)
     username = username_of(update)
-    token = tickets.parse(start_payload_of(update))
-    if token and session_factory is not None:
-        item = tickets.peek(token)
+    token = tickets.parse(payload)
+    if token:
+        before = tickets.status(token)
         async with session_factory() as session:
             user = await get_or_create_user(session, user_id, name or "Гость MAX", username)
             if user.role == UserRole.NONE.value:
                 user.role = UserRole.CLIENT.value
             await session.commit()
-        if tickets.complete(token, user_id):
+        if not tickets.complete(token, user_id):
+            return False
+        if before == "pending":
             base = client.settings.public_base_url.rstrip("/")
             complete = f"{base}/login/complete/{token}"
             await client.send_message(
                 user_id=user_id,
-                text="Вход на сайт подтверждён. Вернись во вкладку — или жми кнопку ниже.",
+                text="Вход на сайт подтверждён. Не закрывай вкладку Картыча — кабинет откроется сам. Если вкладка пропала, жми кнопку ниже.",
                 attachments=[inline_keyboard([[link_button("Открыть Картыч", complete)]])],
             )
-            return
-    invite_token = parse_staff_start(start_payload_of(update))
-    if invite_token and session_factory is not None:
+        return True
+    invite_token = parse_staff_start(payload)
+    if invite_token:
         async with session_factory() as session:
             user = await get_or_create_user(session, user_id, name or "Гость MAX", username)
             ok, message = await accept_staff_invite(session, user, invite_token)
@@ -255,9 +266,9 @@ async def handle_bot_started(
                 )
             ],
         )
-        return
-    promo_id = parse_promo_start(start_payload_of(update))
-    if promo_id and session_factory is not None:
+        return True
+    promo_id = parse_promo_start(payload)
+    if promo_id:
         async with session_factory() as session:
             user = await get_or_create_user(session, user_id, name or "Гость MAX", username)
             ok, message, _shop = await join_promo_token(session, user, promo_id)
@@ -272,7 +283,25 @@ async def handle_bot_started(
                 )
             ],
         )
+        return True
+    return False
+
+
+async def handle_bot_started(
+    client: MaxClient,
+    update: dict[str, Any],
+    bot: dict[str, Any] | None,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    user_id = user_id_of(update)
+    if user_id is None:
+        log.warning("bot_started without user_id: %s", update)
         return
+    _pending.pop(user_id, None)
+    if await apply_deeplink_start(client, update, bot, session_factory=session_factory):
+        return
+    name = display_name_of(update)
     name_part = f", {name}" if name else ""
     business = await is_business_user(session_factory, user_id)
     await client.send_message(
@@ -294,6 +323,11 @@ async def handle_message_created(
     lowered = text.lower()
     user_id = user_id_of(update)
     if user_id is None:
+        return
+    if await apply_deeplink_start(client, update, bot, session_factory=session_factory):
+        return
+    if lowered in {"/start"} or lowered.startswith("/start "):
+        await handle_bot_started(client, update, bot, session_factory=session_factory)
         return
     if lowered in {"/scan", "scan", "qr", "считать qr", "камера"}:
         _pending[user_id] = "scan"

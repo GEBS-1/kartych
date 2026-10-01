@@ -95,7 +95,7 @@ def schedule_label(days: str, start: str, end: str) -> str:
     names = dict(WEEKDAYS)
     labels = [names[item] for item in (days or "").split(",") if item in names]
     hours = f"{start or '10:00'}–{end or '22:00'}"
-    return f"{', '.join(labels) or 'Пн–Пт'} · {hours}"
+    return f"{', '.join(labels) or 'без смен'} · {hours}"
 
 
 def shop_is_live(shop: Business) -> bool:
@@ -1371,6 +1371,78 @@ async def list_shop_staff(session: AsyncSession, shop: Business) -> list[dict[st
     return people
 
 
+def staff_week_board(people: list[dict[str, Any]], *, today: str | None = None) -> list[dict[str, Any]]:
+    if today is None:
+        today = WEEKDAYS[datetime.now().weekday()][0]
+    cashiers = [person for person in people if person.get("kind") != "owner"]
+    board = []
+    for key, label in WEEKDAYS:
+        working = []
+        for person in cashiers:
+            days = [item for item in str(person.get("schedule_days") or "").split(",") if item]
+            if key in days:
+                working.append(person)
+        board.append({"key": key, "label": label, "today": key == today, "people": working})
+    return board
+
+
+async def add_staff_by_max_id(
+    session: AsyncSession,
+    shop: Business,
+    max_user_id: int,
+    *,
+    can_stats: bool = False,
+    can_earn: bool = False,
+    can_scan: bool = True,
+    can_edit: bool = False,
+    schedule_days: str = DEFAULT_DAYS,
+    shift_from: str = "10:00",
+    shift_to: str = "22:00",
+) -> tuple[bool, str, ShopStaff | None]:
+    if shop.owner_max_user_id == max_user_id:
+        return False, "Это владелец точки, его в график кассиров не добавляем.", None
+    if max_user_id <= 0:
+        return False, "Нужен MAX id из профиля сотрудника — положительное число.", None
+    existing = await staff_for(session, max_user_id)
+    if existing is not None and existing.business_id != shop.id:
+        return False, "Этот человек уже кассир другой точки.", None
+    if existing is not None:
+        return False, "Он уже в графике этой точки.", None
+    person = await get_or_create_user(session, max_user_id, f"MAX {max_user_id}", None)
+    days, start, end = normalize_schedule(schedule_days, shift_from, shift_to)
+    row = ShopStaff(
+        business_id=shop.id,
+        max_user_id=max_user_id,
+        kind="cashier",
+        can_stats=can_stats,
+        can_earn=can_earn,
+        can_scan=can_scan,
+        can_edit=can_edit,
+        schedule_days=days,
+        shift_from=start,
+        shift_to=end,
+    )
+    session.add(row)
+    if person.role == UserRole.NONE.value:
+        person.role = UserRole.BUSINESS.value
+    await session.flush()
+    return True, f"Добавили в график. Смены: {schedule_label(days, start, end)}.", row
+
+
+def toggle_staff_day(row: ShopStaff, day: str) -> str:
+    wanted = {item for item, _label in WEEKDAYS}
+    if day not in wanted:
+        return row.schedule_days
+    picked = [item for item in (row.schedule_days or "").split(",") if item in wanted]
+    if day in picked:
+        picked = [item for item in picked if item != day]
+    else:
+        picked.append(day)
+        picked = [item for item, _label in WEEKDAYS if item in set(picked)]
+    row.schedule_days = ",".join(picked)
+    return row.schedule_days
+
+
 async def accept_staff_invite(
     session: AsyncSession, user: AppUser, token: str
 ) -> tuple[bool, str]:
@@ -1509,27 +1581,191 @@ async def join_promo_token(
     return await join_promo(session, user, program.id)
 
 
-async def geocode_address(query: str) -> dict[str, Any] | None:
+async def geocode_places(query: str, *, limit: int = 5, city: str = "") -> list[dict[str, Any]]:
     text = (query or "").strip()
-    if len(text) < 3:
-        return None
+    town = (city or "").strip()
+    if len(text) < 3 and not town:
+        return []
+    found: list[dict[str, Any]] = []
+    seen: set[tuple[float, float]] = set()
+
+    def take(rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            key = (round(row["lat"], 5), round(row["lng"], 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(row)
+
+    for candidate in address_search_queries(text, town):
+        if len(found) >= limit:
+            break
+        take(await _nominatim_search(candidate, limit=limit))
+        if len(found) < limit:
+            take(await _photon_search(candidate, limit=limit))
+    if town and text and len(found) < limit:
+        take(await _nominatim_structured(street=text, city=town, limit=limit))
+    return found[:limit]
+
+
+def address_search_queries(query: str, city: str = "") -> list[str]:
+    text = (query or "").strip(" ,")
+    town = (city or "").strip(" ,")
+    rows: list[str] = []
+    if town and text:
+        rows.extend((f"{town}, {text}", f"{text}, {town}"))
+    if text:
+        rows.append(text)
+    elif town:
+        rows.append(town)
+    extra: list[str] = []
+    for row in rows:
+        extra.append(row)
+        if "росси" not in row.casefold() and _looks_cyrillic(row):
+            extra.append(f"{row}, Россия")
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for row in extra:
+        key = " ".join(row.casefold().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(row)
+    return uniq
+
+
+def _looks_cyrillic(value: str) -> bool:
+    return any("а" <= char.lower() <= "я" or char.lower() == "ё" for char in value)
+
+
+def _http_headers() -> dict[str, str]:
+    return {"User-Agent": "Kartych/1.0 (loyalty map)", "Accept-Language": "ru"}
+
+
+async def _nominatim_search(query: str, *, limit: int) -> list[dict[str, Any]]:
     import httpx
 
-    async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "Kartych/1.0"}) as client:
-        response = await client.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": text, "format": "json", "limit": 1, "addressdetails": 1},
-        )
-        response.raise_for_status()
-        rows = response.json()
-    if not rows:
-        return None
-    row = rows[0]
-    return {
-        "lat": float(row["lat"]),
-        "lng": float(row["lon"]),
-        "label": str(row.get("display_name") or text),
+    params: dict[str, Any] = {
+        "q": query,
+        "format": "json",
+        "limit": max(1, min(limit, 8)),
+        "addressdetails": 0,
+        "accept-language": "ru",
     }
+    if _looks_cyrillic(query):
+        params["countrycodes"] = "ru"
+    try:
+        async with httpx.AsyncClient(timeout=8.0, headers=_http_headers()) as client:
+            response = await client.get("https://nominatim.openstreetmap.org/search", params=params)
+            response.raise_for_status()
+            rows = response.json()
+    except Exception:
+        return []
+    return _nominatim_rows(rows, query)
+
+
+async def _nominatim_structured(*, street: str, city: str, limit: int) -> list[dict[str, Any]]:
+    import httpx
+
+    params = {
+        "street": street,
+        "city": city,
+        "country": "Россия",
+        "format": "json",
+        "limit": max(1, min(limit, 8)),
+        "addressdetails": 0,
+        "accept-language": "ru",
+        "countrycodes": "ru",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0, headers=_http_headers()) as client:
+            response = await client.get("https://nominatim.openstreetmap.org/search", params=params)
+            response.raise_for_status()
+            rows = response.json()
+    except Exception:
+        return []
+    return _nominatim_rows(rows, f"{city}, {street}")
+
+
+def _nominatim_rows(rows: Any, fallback: str) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            found.append(
+                {
+                    "lat": float(row["lat"]),
+                    "lng": float(row["lon"]),
+                    "label": str(row.get("display_name") or fallback),
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return found
+
+
+async def _photon_search(query: str, *, limit: int) -> list[dict[str, Any]]:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0, headers=_http_headers()) as client:
+            response = await client.get(
+                "https://photon.komoot.io/api/",
+                params={"q": query, "lang": "ru", "limit": max(1, min(limit, 8))},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return []
+    found: list[dict[str, Any]] = []
+    for feature in payload.get("features") or []:
+        geometry = feature.get("geometry") or {}
+        coords = geometry.get("coordinates") or []
+        props = feature.get("properties") or {}
+        if len(coords) < 2:
+            continue
+        try:
+            lng, lat = float(coords[0]), float(coords[1])
+        except (TypeError, ValueError):
+            continue
+        parts = [
+            props.get("name"),
+            " ".join(part for part in (props.get("street"), props.get("housenumber")) if part),
+            props.get("city") or props.get("town") or props.get("village"),
+        ]
+        found.append({"lat": lat, "lng": lng, "label": ", ".join(part for part in parts if part) or query})
+    return found
+
+
+def map_shop_hits(
+    shops: list[Business],
+    locations: dict[str, dict[str, float]],
+    query: str,
+) -> list[dict[str, Any]]:
+    needle = (query or "").strip().casefold()
+    if len(needle) < 2:
+        return []
+    hits: list[dict[str, Any]] = []
+    for shop in shops:
+        blob = " ".join(part for part in (shop.name, shop.city, shop.address, shop.website) if part).casefold()
+        if needle not in blob and not _stem_match(shop, needle):
+            continue
+        loc = locations.get(shop.id)
+        hits.append(
+            {
+                "id": shop.id,
+                "name": shop.name,
+                "city": shop.city,
+                "address": shop.address,
+                "lat": loc["lat"] if loc else None,
+                "lng": loc["lng"] if loc else None,
+            }
+        )
+    return hits[:12]
+
+
+async def geocode_address(query: str, *, city: str = "") -> dict[str, Any] | None:
+    rows = await geocode_places(query, limit=1, city=city)
+    return rows[0] if rows else None
 
 
 async def save_shop_location(

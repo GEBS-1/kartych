@@ -91,20 +91,24 @@ async function waitMaxLogin() {
   const box = document.getElementById("max-wait");
   const token = box?.dataset.token;
   if (!token) return;
-  const maxUrl = box.dataset.maxUrl || "";
-  const openedKey = "cup-max-login-opened-" + token;
-  let already = false;
-  try { already = sessionStorage.getItem(openedKey) === "1"; } catch {}
-  if (maxUrl && !already) {
-    try { sessionStorage.setItem(openedKey, "1"); } catch {}
-    window.location.assign(maxUrl);
+  const copy = box.querySelector("[data-copy-code]");
+  if (copy) {
+    copy.addEventListener("click", async () => {
+      const code = box.dataset.payload || copy.textContent || "";
+      try {
+        await navigator.clipboard.writeText(code.trim());
+        toast("Код скопирован. Вставь его сообщением боту в приложении MAX.");
+      } catch {
+        toast("Скопируй код руками и отправь боту в MAX.");
+      }
+    });
   }
-  for(let i=0;i<80;i++) {
+  for(let i=0;i<120;i++) {
     try {
       const response = await fetch("/login/status/"+encodeURIComponent(token));
       const data = await response.json();
-      if(data.status==="ok") {window.location.replace("/login/complete/"+encodeURIComponent(token));return;}
-      if(["expired","missing","used"].includes(data.status)) {window.location.replace("/login?err=expired");return;}
+      if(data.status==="ok" || data.status==="used") {window.location.replace("/login/complete/"+encodeURIComponent(token));return;}
+      if(["expired","missing"].includes(data.status)) {window.location.replace("/login?err=expired");return;}
     } catch {}
     await new Promise(resolve=>setTimeout(resolve,1500));
   }
@@ -151,26 +155,202 @@ function addFreeTiles(map) {
     className: dark ? "map-tiles-dark" : ""
   }).addTo(map);
 }
+function kmBetween(a, b) {
+  const toRad = value => value * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+  const s = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng/2)**2;
+  return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+function yandexRoute(lat, lng) {
+  return "https://yandex.ru/maps/?rtext=~" + lat + "," + lng;
+}
+function shopPopup(place) {
+  const box = document.createElement("div");
+  box.className = "map-popup";
+  const title = document.createElement("a");
+  title.href = "/shops/" + encodeURIComponent(place.id);
+  title.textContent = place.name;
+  const meta = document.createElement("small");
+  meta.textContent = [place.city, place.address].filter(Boolean).join(" · ");
+  const actions = document.createElement("div");
+  actions.className = "map-popup-actions";
+  const open = document.createElement("a");
+  open.className = "btn small";
+  open.href = "/shops/" + encodeURIComponent(place.id);
+  open.textContent = "Зайти";
+  const route = document.createElement("a");
+  route.className = "text-link";
+  route.target = "_blank";
+  route.rel = "noopener";
+  route.href = yandexRoute(place.lat, place.lng);
+  route.textContent = "Маршрут";
+  actions.append(open, route);
+  box.append(title, meta, actions);
+  return box;
+}
+function markOnMap(map, lat, lng, kind) {
+  const point = [lat, lng];
+  map.setView(point, 15);
+  const key = kind === "me" ? "cupMeMarker" : "cupSearchMarker";
+  const style = kind === "me"
+    ? {radius:8,color:"#fff",fillColor:"#2d5aa0",fillOpacity:1,weight:3}
+    : {radius:7,color:"#fff",fillColor:"#e8941a",fillOpacity:1,weight:3};
+  if (window[key]) window[key].setLatLng(point);
+  else window[key] = L.circleMarker(point, style).addTo(map);
+  return point;
+}
+function sortRowsByDistance(origin) {
+  const list = document.querySelector(".place-list");
+  if (!list || !window.cupMapMarkers) return;
+  const rows = Array.from(list.querySelectorAll(".place-row"));
+  rows.sort((left, right) => {
+    const a = window.cupMapMarkers.find(item => item.id === left.dataset.id);
+    const b = window.cupMapMarkers.find(item => item.id === right.dataset.id);
+    const da = a ? kmBetween(origin, a.marker.getLatLng()) : 9999;
+    const db = b ? kmBetween(origin, b.marker.getLatLng()) : 9999;
+    return da - db;
+  });
+  rows.forEach(row => {
+    const marker = window.cupMapMarkers.find(item => item.id === row.dataset.id);
+    const dist = row.querySelector(".place-dist");
+    if (marker) {
+      const km = kmBetween(origin, marker.marker.getLatLng());
+      const label = km < 1 ? Math.round(km * 1000) + " м" : km.toFixed(1) + " км";
+      if (dist) dist.textContent = label;
+      else {
+        const small = document.createElement("small");
+        small.className = "place-dist";
+        small.textContent = label;
+        row.querySelector(".place-info small")?.after(small);
+      }
+    }
+    list.append(row);
+  });
+}
+async function readMyLocation() {
+  const app = webApp();
+  if (app && typeof app.requestLocation === "function") {
+    try {
+      const loc = await app.requestLocation();
+      const lat = loc?.latitude ?? loc?.lat;
+      const lng = loc?.longitude ?? loc?.lng ?? loc?.lon;
+      if (Number.isFinite(lat) && Number.isFinite(lng)) return {lat, lng};
+    } catch {}
+  }
+  if (!navigator.geolocation) throw new Error("no-geo");
+  return await new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      position => resolve({lat: position.coords.latitude, lng: position.coords.longitude}),
+      reject,
+      {enableHighAccuracy:true, timeout:12000, maximumAge:20000}
+    );
+  });
+}
+async function locateOnMap(map, {sort=false}={}) {
+  if (!map) { toast("Карта ещё открывается."); return null; }
+  try {
+    const point = await readMyLocation();
+    markOnMap(map, point.lat, point.lng, "me");
+    if (sort) sortRowsByDistance(point);
+    return point;
+  } catch {
+    toast("Не вижу геолокацию. Разреши её или найди адрес в поиске.");
+    return null;
+  }
+}
+function openShopMarker(id) {
+  const found = window.cupMapMarkers?.find(item => item.id === id);
+  if (!found || !window.cupMap) return;
+  window.cupMap.setView(found.marker.getLatLng(), 16);
+  found.marker.openPopup();
+  document.querySelector(`.place-row[data-id="${id}"]`)?.scrollIntoView({block:"nearest", behavior:"smooth"});
+}
+function hideSuggest() {
+  const box = document.getElementById("map-suggest");
+  if (box) box.hidden = true;
+}
+function showSuggest(shops, places) {
+  const box = document.getElementById("map-suggest");
+  if (!box) return;
+  box.replaceChildren();
+  const add = (label, detail, onPick) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const strong = document.createElement("strong");
+    strong.textContent = label;
+    const small = document.createElement("small");
+    small.textContent = detail;
+    btn.append(strong, small);
+    btn.addEventListener("click", onPick);
+    box.append(btn);
+  };
+  shops.forEach(shop => add(shop.name, [shop.city, shop.address].filter(Boolean).join(" · ") || "Точка Картыча", () => {
+    document.getElementById("map-query").value = shop.name;
+    filterRows();
+    hideSuggest();
+    if (shop.lat != null) openShopMarker(shop.id);
+    else window.location.assign("/shops/" + encodeURIComponent(shop.id));
+  }));
+  places.forEach(place => add(place.label.split(",")[0], place.label, () => {
+    hideSuggest();
+    if (!window.cupMap) return;
+    markOnMap(window.cupMap, place.lat, place.lng, "search");
+    window.cupSearchMarker?.bindPopup(place.label).openPopup();
+    sortRowsByDistance({lat: place.lat, lng: place.lng});
+  }));
+  box.hidden = box.childElementCount === 0;
+}
+let mapSearchTimer = 0;
+async function searchMapQuery(query, {openFirst=false}={}) {
+  const text = (query || "").trim();
+  if (text.length < 2) { hideSuggest(); return; }
+  try {
+    const response = await fetch("/places/search", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({q:text})});
+    const data = await response.json();
+    if (!data.ok) return;
+    showSuggest(data.shops || [], data.places || []);
+    if (openFirst && data.shops?.[0]?.lat != null) openShopMarker(data.shops[0].id);
+    else if (openFirst && data.places?.[0] && window.cupMap) {
+      hideSuggest();
+      markOnMap(window.cupMap, data.places[0].lat, data.places[0].lng, "search");
+      window.cupSearchMarker?.bindPopup(data.places[0].label).openPopup();
+      sortRowsByDistance({lat: data.places[0].lat, lng: data.places[0].lng});
+    }
+  } catch { if (openFirst) toast("Не удалось найти это место."); }
+}
 function setupMap() {
   const el = document.getElementById("places-map"), data = document.getElementById("map-data");
   if (!el || !window.L) return;
   const places = data ? JSON.parse(data.textContent || "[]") : [];
   el.replaceChildren();
   const start = places[0] ? [places[0].lat, places[0].lng] : [55.7558, 37.6173];
-  const map = L.map(el, {scrollWheelZoom:true, attributionControl:false, minZoom:8, zoomControl:true}).setView(start, places.length ? 13 : 10);
+  const map = L.map(el, {scrollWheelZoom:true, attributionControl:false, minZoom:8, zoomControl:true}).setView(start, places.length ? 13 : 11);
   addFreeTiles(map);
   window.cupMap = map;
   window.cupMapMarkers = places.map(place=>{
     const marker = L.marker([place.lat,place.lng],{icon:L.divIcon({className:"map-pin",iconSize:[24,24],iconAnchor:[12,24]})}).addTo(map);
-    const box = document.createElement("div");
-    const link = document.createElement("a"); link.href="/shops/"+encodeURIComponent(place.id); link.textContent=place.name;
-    const meta = document.createElement("small"); meta.textContent=[place.city, place.address].filter(Boolean).join(" · ");
-    box.append(link, meta);
-    marker.bindPopup(box);
+    marker.bindPopup(shopPopup(place));
+    marker.on("click", () => document.querySelector(`.place-row[data-id="${place.id}"]`)?.scrollIntoView({block:"nearest"}));
     return {marker,id:place.id};
   });
   if(places.length>1) map.fitBounds(places.map(p=>[p.lat,p.lng]),{padding:[35,35],maxZoom:14});
   setTimeout(()=>map.invalidateSize(), 200);
+  const query = document.getElementById("map-query");
+  query?.addEventListener("input", () => {
+    filterRows();
+    clearTimeout(mapSearchTimer);
+    mapSearchTimer = setTimeout(() => searchMapQuery(query.value), 350);
+  });
+  query?.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      searchMapQuery(query.value, {openFirst:true});
+    }
+    if (event.key === "Escape") hideSuggest();
+  });
+  document.addEventListener("click", event => {
+    if (!event.target.closest(".map-search")) hideSuggest();
+  });
 }
 document.addEventListener("click",async event=>{
   if(event.target.closest("#scan-btn, [data-open-scanner]")) {event.preventDefault();scanQr();}
@@ -182,13 +362,20 @@ document.addEventListener("click",async event=>{
     filterRows();
   }
   if(event.target.closest("#locate-me")) {
-    if (!navigator.geolocation) {toast("Геолокация недоступна. Выбери место из списка.");return;}
-    navigator.geolocation.getCurrentPosition(position=>{
-      if(!window.cupMap){toast("Точки ещё не добавили координаты. Адреса есть в списке.");return;}
-      const point=[position.coords.latitude,position.coords.longitude];
-      window.cupMap.setView(point,14);
-      L.circleMarker(point,{radius:7,color:"#fff",fillColor:"#3b82f6",fillOpacity:1,weight:3}).addTo(window.cupMap);
-    },()=>toast("Геолокация недоступна. Можно найти место по названию или адресу."));
+    event.preventDefault();
+    locateOnMap(window.cupMap, {sort:true});
+  }
+  if(event.target.closest("#apply-locate")) {
+    event.preventDefault();
+    const mapEl = document.getElementById("apply-map");
+    if (!mapEl || !window.cupApplyMap) return;
+    locateOnMap(window.cupApplyMap).then(point => {
+      if (!point) return;
+      const lat = document.getElementById("apply-lat");
+      const lng = document.getElementById("apply-lng");
+      if (lat && lng) { lat.value = point.lat.toFixed(6); lng.value = point.lng.toFixed(6); }
+      window.cupApplyPut?.({lat: point.lat, lng: point.lng});
+    });
   }
   if(event.target.closest("#scan-torch")) {
     const track=scanner.stream?.getVideoTracks()[0];
@@ -224,30 +411,85 @@ function setupApplyMap() {
   if (!el || !window.L) return;
   const startLat = Number(lat?.value) || 55.7558;
   const startLng = Number(lng?.value) || 37.6173;
-  const map = L.map(el, {scrollWheelZoom:true, attributionControl:false, minZoom:8, zoomControl:true}).setView([startLat, startLng], lat?.value ? 15 : 10);
+  const map = L.map(el, {scrollWheelZoom:true, attributionControl:false, minZoom:8, zoomControl:true}).setView([startLat, startLng], lat?.value ? 16 : 11);
   addFreeTiles(map);
+  window.cupApplyMap = map;
   setTimeout(()=>map.invalidateSize(), 200);
   const pin = () => L.divIcon({className:"map-pin",iconSize:[24,24],iconAnchor:[12,24]});
   let marker = lat?.value && lng?.value ? L.marker([startLat, startLng], {icon: pin()}).addTo(map) : null;
-  const put = (point) => {
+  const note = document.getElementById("apply-pin-label");
+  const put = (point, label) => {
     if (!lat || !lng) return;
-    lat.value = point.lat.toFixed(6);
-    lng.value = point.lng.toFixed(6);
+    lat.value = Number(point.lat).toFixed(6);
+    lng.value = Number(point.lng).toFixed(6);
     if (marker) marker.setLatLng(point);
     else marker = L.marker(point, {icon: pin()}).addTo(map);
-    map.setView(point, 16);
+    map.setView(point, 17);
+    if (note) note.textContent = label ? ("Метка: " + label) : "Метка стоит на карте. Можно подвинуть пальцем.";
   };
-  map.on("click", event => put(event.latlng));
-  document.getElementById("geocode-btn")?.addEventListener("click", async () => {
-    const form = document.getElementById("apply-form");
-    const q = ["city","address","name"].map(name => form?.elements[name]?.value || "").join(" ").trim();
-    if (q.length < 3) { toast("Укажи город и адрес"); return; }
+  window.cupApplyPut = put;
+  map.on("click", event => put(event.latlng, "точка на карте"));
+  const hideApplySuggest = () => {
+    const box = document.getElementById("apply-suggest");
+    if (box) box.hidden = true;
+  };
+  const showApplySuggest = (places) => {
+    const box = document.getElementById("apply-suggest");
+    if (!box) return;
+    box.replaceChildren();
+    places.forEach(place => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      const strong = document.createElement("strong");
+      strong.textContent = place.label.split(",")[0];
+      const small = document.createElement("small");
+      small.textContent = place.label;
+      btn.append(strong, small);
+      btn.addEventListener("click", () => {
+        hideApplySuggest();
+        put({lat: place.lat, lng: place.lng}, place.label);
+      });
+      box.append(btn);
+    });
+    box.hidden = box.childElementCount === 0;
+  };
+  const addressQuery = () => {
+    const form = document.getElementById("apply-form") || lat?.form;
+    const city = document.getElementById("apply-city")?.value || form?.elements?.city?.value || "";
+    const address = document.getElementById("apply-address")?.value || form?.elements?.address?.value || "";
+    const typed = document.getElementById("apply-search")?.value || "";
+    return {q: (typed.trim() || address).trim(), city: city.trim()};
+  };
+  const findAddress = async ({openFirst=true}={}) => {
+    const {q, city} = addressQuery();
+    if ((q || city).replace(/\s+/g,"").length < 3) { toast("Напиши город, улицу и номер дома"); return; }
     try {
-      const response = await fetch("/biz/geocode", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({q})});
+      const response = await fetch("/biz/geocode", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({q, city})});
       const data = await response.json();
-      if (!data.ok) { toast(data.message || "Адрес не найден"); return; }
-      put({lat: data.lat, lng: data.lng});
-    } catch { toast("Не удалось определить адрес"); }
+      const places = data.places || [];
+      if (!places.length) { toast(data.message || "Адрес не найден"); return; }
+      showApplySuggest(places);
+      if (openFirst) put({lat: places[0].lat, lng: places[0].lng}, places[0].label);
+    } catch { toast("Не удалось найти адрес"); }
+  };
+  document.getElementById("geocode-btn")?.addEventListener("click", async () => {
+    await findAddress({openFirst:true});
+  });
+  const applySearch = document.getElementById("apply-search");
+  let applyTimer = 0;
+  applySearch?.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); findAddress({openFirst:true}); }
+    if (event.key === "Escape") hideApplySuggest();
+  });
+  applySearch?.addEventListener("input", () => {
+    clearTimeout(applyTimer);
+    applyTimer = setTimeout(() => findAddress({openFirst:false}), 450);
+  });
+  ["apply-city","apply-address"].forEach(id => {
+    document.getElementById(id)?.addEventListener("change", () => findAddress({openFirst:true}));
+  });
+  document.addEventListener("click", event => {
+    if (!event.target.closest(".map-search")) hideApplySuggest();
   });
 }
 setupMap(); setupApplyMap(); setupTheme(); waitMaxLogin();

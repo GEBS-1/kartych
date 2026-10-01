@@ -2,6 +2,8 @@ from io import BytesIO
 
 from PIL import Image
 
+from app.web.loyalty import address_search_queries
+
 
 LANDING_PHOTOS = {
     "/static/img/landing/hero.png": (2153, 730),
@@ -11,6 +13,14 @@ LANDING_PHOTOS = {
     "/static/img/landing/scan.png": (1358, 1159),
     "/static/img/landing/gift.png": (1358, 1159),
 }
+
+
+def test_address_queries_prefer_street_and_city() -> None:
+    rows = address_search_queries("Тверская, 7", "Москва")
+    blob = " | ".join(rows)
+    assert "Москва" in blob
+    assert "Тверская" in blob
+    assert "Россия" in blob
 
 
 def test_favicon(client) -> None:
@@ -72,6 +82,13 @@ def test_public_site(client) -> None:
     assert "Точка на Ленина" in shops.text
     assert "Профиль" in shops.text
     assert "Рядом" in shops.text
+    assert 'id="locate-me"' in shops.text
+    assert 'id="map-query"' in shops.text
+    found = client.post("/places/search", json={"q": "Ленина"})
+    assert found.status_code == 200
+    hits = found.json()
+    assert hits["ok"] is True
+    assert any("Ленина" in shop["name"] for shop in hits["shops"])
     assert "Карты" in shops.text
 
 
@@ -83,10 +100,15 @@ def test_max_login_greeting(client, app) -> None:
     assert 'name="name"' not in page.text
     wait = client.post("/login", data={"role": "client"})
     assert wait.status_code == 200
-    assert "Подтверди в MAX" in wait.text
+    assert "Подтверди в приложении MAX" in wait.text
+    assert "продолжить в браузере" in wait.text
+    assert "Начать" in wait.text
+    assert 'class="qr-frame"' in wait.text
     token = wait.text.split('data-token="', 1)[1].split('"', 1)[0]
-    assert f"?start=c_{token}" in wait.text
+    assert f"?startapp=c_{token}" in wait.text
+    assert f"?start=c_{token}" not in wait.text
     assert f'data-max-url="https://max.ru/' in wait.text
+    assert 'target="_blank"' in wait.text
     assert "Открыть MAX →" not in wait.text
     hook = client.post(
         "/webhook",
@@ -111,6 +133,14 @@ def test_max_login_greeting(client, app) -> None:
     assert "Карты любимых мест" in home.text
     cabinet = client.get("/me")
     assert "Привет, Камиль" in cabinet.text
+    client.cookies.clear()
+    replay = client.get(f"/login/complete/{token}", follow_redirects=True)
+    assert replay.status_code == 200
+    assert "Привет, Камиль" in replay.text
+    client.cookies.clear()
+    waiting = client.get(f"/login?ticket={token}")
+    assert waiting.status_code == 200
+    assert "qr-frame" in waiting.text
     kwargs = app.state.max_client.send_message.await_args.kwargs
     assert "подтвержд" in kwargs["text"].lower()
     buttons = kwargs["attachments"][0]["payload"]["buttons"]
@@ -133,7 +163,7 @@ def test_demo_client_cabinet_and_join(client) -> None:
 def test_guest_and_business_bars(client) -> None:
     client.post("/login/demo", data={"role": "client"})
     guest = client.get("/me")
-    assert 'href="/qr"' in guest.text
+    assert 'href="/me/qr"' in guest.text
     assert 'id="scan-btn"' not in guest.text
     assert "cup-bar" in guest.text
     assert "cup-bar-top" not in guest.text
@@ -142,14 +172,22 @@ def test_guest_and_business_bars(client) -> None:
     client.post("/login/demo", data={"role": "business"})
     biz = client.get("/biz")
     assert "Аналитика" in biz.text
-    assert "Игры" in biz.text
-    assert 'href="/biz/promos"' in biz.text
-    assert 'href="/qr"' in biz.text
+    assert "Сотрудники" in biz.text
+    assert 'href="/biz/staff"' in biz.text
     assert 'href="/biz/scan"' in biz.text
     assert 'id="scan-btn"' in biz.text
+    bar = biz.text.split('<nav class="cup-bar', 1)[1].split("</nav>", 1)[0]
+    assert 'href="/biz/earn"' not in bar
+    assert bar.count('href="/biz/scan"') == 1
+    assert 'id="scan-btn"' in bar
+    assert "Акции" in bar
     assert "Гостей" in biz.text
     assert "Средний чек" in biz.text
     assert 'action="/biz/earn"' in client.get("/biz/earn").text
+    scan = client.get("/biz/scan")
+    assert "Сканировать QR" in scan.text
+    assert 'href="/biz/earn"' in scan.text
+    assert "Показать QR покупки" in scan.text
     contests = client.get("/biz/contests")
     assert "По покупкам" in contests.text
     assert "Бонусы" in contests.text
@@ -161,7 +199,9 @@ def test_guest_and_business_bars(client) -> None:
     assert "Stamp Me" not in contests.text
     staff = client.get("/biz/staff")
     assert staff.status_code == 200
-    assert "Пригласить кассира" in staff.text
+    assert "График смен" in staff.text
+    assert "Добавить по MAX id" in staff.text
+    assert "Пригласить" in staff.text
 
 
 def test_owner_switches_to_guest_cabinet(client) -> None:
@@ -172,12 +212,42 @@ def test_owner_switches_to_guest_cabinet(client) -> None:
     assert guest.status_code == 200
     assert "Мои карты" in guest.text
     assert "К точке" in guest.text
-    assert 'href="/qr"' in guest.text
+    assert 'href="/me/qr"' in guest.text
     assert "Аналитика" not in guest.text.split("cup-bar", 1)[-1]
     back = client.get("/as/biz", follow_redirects=True)
     assert back.status_code == 200
     assert "Аналитика" in back.text
     assert "Как гость" in back.text
+
+
+def test_admin_panel_keeps_guest_search_bar() -> None:
+    from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        app_env="test",
+        max_bot_token="test-token",
+        max_bot_username="cupcard_bot",
+        webhook_secret="secret123",
+        public_base_url="https://example.test",
+        subscribe_on_startup=False,
+        admin_max_user_ids="-22",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        app.state.max_client.send_message = AsyncMock(return_value={"ok": True})
+        client.post("/login/demo", data={"role": "business"})
+        page = client.get("/admin")
+        assert page.status_code == 200
+        bar = page.text.split("cup-bar", 1)[-1]
+        assert "Рядом" in bar
+        assert "Скан" not in bar
+        assert 'href="/me/shops"' in page.text
+        assert 'href="/biz/scan"' not in bar
 
 
 def test_earn_and_redeem_qr(client) -> None:
@@ -206,6 +276,16 @@ def test_business_apply_waits_for_admin(client, app) -> None:
     page = client.get("/biz/apply")
     assert page.status_code == 200
     assert "Открыть точку" in page.text
+    assert "Название точки" in page.text
+    assert "Сайт организации" in page.text
+    assert 'id="apply-search"' in page.text
+    assert 'id="apply-locate"' in page.text
+    assert "Улица и дом" in page.text
+    assert "Поставить метку по адресу" in page.text
+    assert "Широта" not in page.text
+    assert "Долгота" not in page.text
+    assert "ФИО" not in page.text
+    assert 'name="director_name"' not in page.text
     sent = client.post(
         "/biz/apply",
         data={
@@ -233,6 +313,8 @@ def test_business_apply_waits_for_admin(client, app) -> None:
     ]
     assert notes
     assert "Новая заявка" in notes[0].kwargs["text"]
+    assert "Иванов" not in notes[0].kwargs["text"]
+    assert "coffee.test" in notes[0].kwargs["text"]
     assert "/admin" not in notes[0].kwargs["text"]
     button = notes[0].kwargs["attachments"][0]["payload"]["buttons"][0][0]
     assert button["type"] == "open_app"
@@ -243,6 +325,8 @@ def test_business_apply_waits_for_admin(client, app) -> None:
     admin = client.get("/admin")
     assert admin.status_code == 200
     assert "Новая кофейня" in admin.text
+    assert "https://coffee.test" in admin.text or "coffee.test" in admin.text
+    assert "Иванов" not in admin.text
     shop_id = admin.text.split("/admin/", 1)[1].split("/review", 1)[0]
     approved = client.post(f"/admin/{shop_id}/review", data={"action": "approve"}, follow_redirects=True)
     assert approved.status_code == 200
@@ -266,7 +350,6 @@ def test_admin_can_search_shop_and_open_access(client, app) -> None:
             "address": "Кремлёвская, 2",
             "website": "https://water-coffee.test",
             "inn": "7707083893",
-            "director_name": "Петров Пётр Петрович",
             "latitude": "55.7963",
             "longitude": "49.1088",
         },
@@ -383,10 +466,13 @@ def test_verify_business_inn(client) -> None:
             "city": "Москва",
             "address": "Ленина, 1",
             "inn": "7707083893",
-            "director_name": "Иванов Иван Иванович",
         },
         follow_redirects=True,
     )
     assert saved.status_code == 200
     assert "7707083893" in saved.text
-    assert "Иванов Иван Иванович" in saved.text
+    assert "ФИО" not in saved.text
+    assert "Широта" not in saved.text
+    assert "Улица и дом" in saved.text
+    assert "Поставить метку по адресу" in saved.text
+    assert "Иванов Иван Иванович" not in saved.text

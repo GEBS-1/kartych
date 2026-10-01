@@ -53,7 +53,7 @@ try:
     for role, pages in [('client',['/me','/me/league','/me/shops','/me/qr','/settings','/biz/apply']), ('business',['/biz','/biz/promos','/biz/staff','/biz/earn','/biz/scan','/settings'])]:
         get(urllib.request.Request(base+'/login/demo', data=('role='+role).encode()), opener)
         for page in pages:
-            assert b'design.css?v=26' in get(base+page, opener), page
+            assert b'design.css?v=29' in get(base+page, opener), page
             assert b'theme-toggle' in get(base+page, opener), page
     assert b'min-width: 900px' in get(base+'/static/css/design.css')
     print('STAGING_OK: client and business pages', flush=True)
@@ -92,7 +92,7 @@ try:
         try:
             health=json.loads(get('http://127.0.0.1:8000/health'))
             assert health.get('ok') and health.get('postgres'), 'Database health failed'
-            assert b'design.css?v=26' in get('http://127.0.0.1:8000/login')
+            assert b'design.css?v=29' in get('http://127.0.0.1:8000/login')
             break
         except Exception: time.sleep(.5)
     else: raise RuntimeError('Updated service failed health checks')

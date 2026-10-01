@@ -67,14 +67,16 @@ class LoginTickets:
     def complete(self, token: str, user_id: int) -> bool:
         with self._lock:
             item = self._items.get(token)
-            if item is None or item["status"] != "pending":
+            if item is None or time.time() - float(item["created"]) > TTL:
                 return False
-            if time.time() - float(item["created"]) > TTL:
-                return False
-            item["status"] = "ok"
-            item["user_id"] = user_id
-            self._save_unlocked()
-            return True
+            if item["status"] == "pending":
+                item["status"] = "ok"
+                item["user_id"] = user_id
+                self._save_unlocked()
+                return True
+            if item["status"] in {"ok", "used"} and item.get("user_id") == user_id:
+                return True
+            return False
 
     def peek(self, token: str) -> dict[str, Any] | None:
         with self._lock:
@@ -88,7 +90,7 @@ class LoginTickets:
             item = self._items.get(token)
             if item is None or time.time() - float(item["created"]) > TTL:
                 return None
-            if item["status"] != "ok" or item["user_id"] is None:
+            if item["user_id"] is None or item["status"] not in {"ok", "used"}:
                 return None
             item["status"] = "used"
             snapshot = dict(item)

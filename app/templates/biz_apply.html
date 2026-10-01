@@ -9,22 +9,27 @@
 {% elif shop and shop.status == 'rejected' %}
 <p class="notice">Предыдущую заявку отклонили. Можно отправить заново с актуальными данными.</p>
 {% else %}
-<p class="muted">Все заходят как гости. Кабинет точки открываем после проверки: сайт организации, адрес и метка на карте.</p>
+<p class="muted">Все заходят как гости. Кабинет точки открываем после проверки: сайт, город, улица и дом.</p>
 {% endif %}
 <form method="post" action="/biz/apply" id="apply-form">
   <label>Название точки<input name="name" required maxlength="160" value="{{ shop.name if shop else '' }}" placeholder="Кофейня «Зерно»"></label>
-  <label>Город<input name="city" maxlength="160" value="{{ shop.city if shop else '' }}" placeholder="Москва"></label>
-  <label>Адрес точки<input name="address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="улица и дом"></label>
+  <label>Город<input name="city" id="apply-city" maxlength="160" value="{{ shop.city if shop else '' }}" placeholder="Москва"></label>
+  <label>Улица и дом<input name="address" id="apply-address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="Тверская, 7"></label>
   <label>Сайт организации<input name="website" maxlength="240" value="{{ shop.website if shop else '' }}" placeholder="https://example.ru"></label>
   <label>ИНН<input name="inn" inputmode="numeric" maxlength="12" value="{{ shop.inn if shop else '' }}" placeholder="10 или 12 цифр"></label>
-  <label>ФИО руководителя / ИП<input name="director_name" maxlength="160" value="{{ shop.director_name if shop else '' }}" placeholder="Иванов Иван Иванович"></label>
-  <p class="muted">Поставь метку на карте или найди адрес — так точка появится у гостей.</p>
-  <div class="form-grid">
-    <label>Широта<input name="latitude" id="apply-lat" type="number" step="any" min="-90" max="90" value="{{ location.latitude if location else '' }}"></label>
-    <label>Долгота<input name="longitude" id="apply-lng" type="number" step="any" min="-180" max="180" value="{{ location.longitude if location else '' }}"></label>
+  <p class="muted">Карта сама найдёт дом по городу, улице и номеру. Широту и долготу писать не нужно — метку можно чуть подвинуть пальцем.</p>
+  <div class="map-search">
+    <label class="search-box">{{ icon('search') }}<input id="apply-search" type="search" placeholder="Например: Москва, Тверская 7" autocomplete="off"></label>
+    <div class="map-suggest" id="apply-suggest" hidden></div>
   </div>
-  <button class="btn secondary full" type="button" id="geocode-btn">Найти адрес на карте</button>
-  <div class="places-map apply-map" id="apply-map"></div>
+  <button class="btn secondary full" type="button" id="geocode-btn">Поставить метку по адресу</button>
+  <div class="places-map-wrap">
+    <div class="places-map apply-map" id="apply-map"></div>
+    <button class="map-locate" type="button" id="apply-locate" aria-label="Моё местоположение">{{ icon('locate') }}</button>
+  </div>
+  <input type="hidden" name="latitude" id="apply-lat" value="{{ location.latitude if location else '' }}">
+  <input type="hidden" name="longitude" id="apply-lng" value="{{ location.longitude if location else '' }}">
+  <p class="footnote" id="apply-pin-label">{% if location %}Метка стоит на карте.{% else %}Метка появится после поиска адреса.{% endif %}</p>
   <button class="btn full">Отправить на подтверждение</button>
 </form>
 <p class="footnote">Карты гостей сможет выдавать только подтверждённая точка.</p>

@@ -1,12 +1,50 @@
 {% extends "site_base.html" %}{% block content %}
 <p class="eyebrow">{{ shop.name if shop else 'Твой бизнес' }}</p>
-<header class="page-heading"><h1>Сотрудники</h1></header>
+<header class="page-heading"><h1>График смен</h1></header>
 {% if not shop %}
-<section class="empty-state"><h2>Сначала добавь точку</h2><p>Потом можно пригласить кассиров и задать им график.</p><a href="/settings" class="btn">Настроить профиль</a></section>
+<section class="empty-state"><h2>Сначала добавь точку</h2><p>Потом можно поставить кассиров в график по MAX id и писать им в бота.</p><a href="/settings" class="btn">Настроить профиль</a></section>
 {% else %}
+<nav class="filter-pills" aria-label="Дни недели">
+  <a href="/biz/staff" class="{% if focus == 'week' %}is-on{% endif %}">Неделя</a>
+  <a href="/biz/staff?day=today" class="{% if focus == 'today' %}is-on{% endif %}">Сегодня</a>
+  {% for key, label in weekdays %}<a href="/biz/staff?day={{ key }}" class="{% if focus == key %}is-on{% endif %}">{{ label }}</a>{% endfor %}
+</nav>
+<section class="shift-week{% if focus != 'week' %} is-focus{% endif %}" aria-label="Смены по дням">
+  {% for column in board %}
+  <div class="shift-day{% if column.today %} is-today{% endif %}">
+    <strong>{{ column.label }}</strong>
+    <small>{% if column.today %}сегодня{% endif %} {{ column.people|length }} чел.</small>
+    {% for person in column.people %}
+    <form method="post" action="/biz/staff/{{ person.id }}/shift">
+      <input type="hidden" name="day" value="{{ column.key }}">
+      <button class="shift-chip" type="submit" title="Снять со смены">{{ person.name }} · {{ person.shift_from }}–{{ person.shift_to }}</button>
+    </form>
+    {% else %}
+    <p class="shift-empty">Никого. Добавь MAX id ниже или отметь день у кассира.</p>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</section>
 <section class="panel">
-  <h2>Пригласить кассира</h2>
-  <p class="muted">Отправь ссылку сотруднику в MAX. Он получит кабинет кассира с теми правами и графиком, которые отметишь.</p>
+  <h2>Добавить по MAX id</h2>
+  <p class="muted">Id человека смотри в его профиле MAX. Поставим в график и напишем в бота Картыча.</p>
+  <form method="post" action="/biz/staff/add">
+    <label>MAX id<input type="number" name="max_user_id" inputmode="numeric" required placeholder="118570442"></label>
+    <div class="perm-pick">
+      <label><input type="checkbox" name="can_stats"> Статистика</label>
+      <label><input type="checkbox" name="can_earn"> Показать QR покупки</label>
+      <label><input type="checkbox" name="can_scan" checked> Сканер гостя</label>
+      <label><input type="checkbox" name="can_edit"> Менять акции и меню</label>
+    </div>
+    <p class="muted">Смены</p>
+    <div class="perm-pick">{% for key, label in weekdays %}<label><input type="checkbox" name="days" value="{{ key }}" {% if key in 'mon,tue,wed,thu,fri' %}checked{% endif %}> {{ label }}</label>{% endfor %}</div>
+    <div class="form-grid"><label>С<input type="time" name="shift_from" value="10:00"></label><label>До<input type="time" name="shift_to" value="22:00"></label></div>
+    <button class="btn full">Поставить в график</button>
+  </form>
+</section>
+<section class="panel">
+  <h2>Пригласить ссылкой</h2>
+  <p class="muted">Если id ещё нет — отправь ссылку в MAX. Человек откроет бота и попадёт в график.</p>
   <form method="post" action="/biz/staff/invite">
     <div class="perm-pick">
       <label><input type="checkbox" name="can_stats"> Статистика</label>
@@ -14,11 +52,9 @@
       <label><input type="checkbox" name="can_scan" checked> Сканер гостя</label>
       <label><input type="checkbox" name="can_edit"> Менять акции и меню</label>
     </div>
-    <p class="footnote">Ссылка одноразовая. По умолчанию кассир только сканирует QR. Остальные права отметь заранее.</p>
-    <p class="muted">График смены</p>
     <div class="perm-pick">{% for key, label in weekdays %}<label><input type="checkbox" name="days" value="{{ key }}" {% if key in 'mon,tue,wed,thu,fri' %}checked{% endif %}> {{ label }}</label>{% endfor %}</div>
     <div class="form-grid"><label>С<input type="time" name="shift_from" value="10:00"></label><label>До<input type="time" name="shift_to" value="22:00"></label></div>
-    <button class="btn full">Создать ссылку</button>
+    <button class="btn secondary full">Создать ссылку</button>
   </form>
   {% for invite in invites %}
   <div class="invite-link">
@@ -28,12 +64,14 @@
   </div>
   {% endfor %}
 </section>
+{% set ns = namespace(cashiers=false) %}
 {% for person in staff_rows %}
 {% if person.kind != 'owner' %}
+{% set ns.cashiers = true %}
 <article class="panel staff-card">
   <strong>{{ person.name }}</strong>
-  {% if person.username %}<small>@{{ person.username }}</small>{% endif %}
-  <p class="muted">График: {{ person.schedule }}</p>
+  <small>MAX id {{ person.max_user_id }}{% if person.username %} · @{{ person.username }}{% endif %}</small>
+  <p class="muted">{{ person.schedule }}</p>
   <form method="post" action="/biz/staff/{{ person.id }}">
     <div class="perm-pick">
       <label><input type="checkbox" name="can_stats" {% if person.can_stats %}checked{% endif %}> Статистика</label>
@@ -47,8 +85,7 @@
   </form>
 </article>
 {% endif %}
-{% else %}
-<p class="footnote">Пока нет кассиров — создай ссылку и отправь её в MAX.</p>
 {% endfor %}
+{% if not ns.cashiers %}<p class="footnote">Пока никого в графике — поставь человека по MAX id или отправь ссылку.</p>{% endif %}
 {% endif %}
 {% endblock %}

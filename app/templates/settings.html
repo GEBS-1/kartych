@@ -1,4 +1,6 @@
-{% extends "site_base.html" %}{% block content %}
+{% extends "site_base.html" %}
+{% block extra_head %}{% if user.is_owner and not user.guest_view %}<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.min.css"><style>.leaflet-control-attribution,.leaflet-attribution-flag,.leaflet-control-container .leaflet-bottom.leaflet-right{display:none!important}</style><script src="/static/vendor/leaflet/leaflet.min.js" defer></script>{% endif %}{% endblock %}
+{% block content %}
 <header class="profile-heading"><span class="avatar profile-avatar">{{ user.first_name[:1] }}</span><div><h1>{{ user.first_name }}</h1><p class="muted">{% if user.guest_view %}Покупай с выгодой{% elif user.is_owner %}Кабинет бизнеса{% elif user.is_cashier %}Кассир{% elif user.pending_shop %}Заявка на проверке{% else %}Покупай с выгодой{% endif %}</p></div></header>
 {% if user.guest_view %}
 <div class="profile-stats"><div><strong>{{ visits }}</strong><small>визитов</small></div><div><strong>{{ cards|length }}</strong><small>карт</small></div><div><strong>{{ bonus }}</strong><small>баллов</small></div></div>
@@ -43,18 +45,23 @@
   <form method="post" action="/biz/setup">
     <label>Организация / сеть<input name="org_name" maxlength="160" value="{{ hq.org_name if hq and hq.org_name else (shop.org_name if shop else '') }}" placeholder="Название сети или ИП"></label>
     <label>Название этой точки<input name="name" required maxlength="160" value="{{ shop.name if shop else '' }}" placeholder="Точка на Ленина"></label>
-    <label>Город<input name="city" maxlength="160" value="{{ shop.city if shop else '' }}" placeholder="Москва"></label>
-    <label>Адрес этой точки<input name="address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="Улица и номер дома"></label>
+    <label>Город<input name="city" id="apply-city" maxlength="160" value="{{ shop.city if shop else '' }}" placeholder="Москва"></label>
+    <label>Улица и дом<input name="address" id="apply-address" maxlength="200" value="{{ shop.address if shop else '' }}" placeholder="Тверская, 7"></label>
     <label>Сайт организации<input name="website" maxlength="240" value="{{ shop.website if shop else '' }}" placeholder="https://example.ru"></label>
     <label>ИНН организации или ИП<input name="inn" inputmode="numeric" maxlength="12" value="{{ shop.inn if shop else '' }}" placeholder="10 или 12 цифр"></label>
-    <label>ФИО руководителя / ИП<input name="director_name" maxlength="160" value="{{ shop.director_name if shop else '' }}" placeholder="Иванов Иван Иванович"></label>
-    <details open><summary>Положение на карте</summary>
-      <p class="footnote">Адрес или координаты — чтобы гости находили именно эту точку. Смена названия не создаёт новую точку.</p>
-      <div class="form-grid">
-        <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" value="{{ location.latitude if location else '' }}" placeholder="55.7558"></label>
-        <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" value="{{ location.longitude if location else '' }}" placeholder="37.6173"></label>
-      </div>
-    </details>
+    <p class="muted">Карта ставит точку по улице и номеру дома. Координаты знать не нужно.</p>
+    <div class="map-search">
+      <label class="search-box">{{ icon('search') }}<input id="apply-search" type="search" placeholder="Город, улица, дом" autocomplete="off" value="{{ ((shop.city ~ ', ' ~ shop.address) if shop and (shop.city or shop.address) else '')|trim(', ') }}"></label>
+      <div class="map-suggest" id="apply-suggest" hidden></div>
+    </div>
+    <button class="btn secondary full" type="button" id="geocode-btn">Поставить метку по адресу</button>
+    <div class="places-map-wrap">
+      <div class="places-map apply-map" id="apply-map"></div>
+      <button class="map-locate" type="button" id="apply-locate" aria-label="Моё местоположение">{{ icon('locate') }}</button>
+    </div>
+    <input type="hidden" name="latitude" id="apply-lat" value="{{ location.latitude if location else '' }}">
+    <input type="hidden" name="longitude" id="apply-lng" value="{{ location.longitude if location else '' }}">
+    <p class="footnote" id="apply-pin-label">{% if location %}Метка стоит на карте. Можно подвинуть пальцем.{% else %}Нажми «Поставить метку по адресу».{% endif %}</p>
     <button class="btn full">Сохранить эту точку</button>
   </form>
   {% if points %}
@@ -74,15 +81,11 @@
   {% endif %}
   <form method="post" action="/biz/point">
     <h3>Добавить точку сети</h3>
-    <p class="muted">Новый адрес той же организации. Название текущей точки не дублируется.</p>
+    <p class="muted">Новый адрес той же организации. Метку поставим по улице и дому, без широты и долготы.</p>
     <label>Название точки<input name="name" required maxlength="160" placeholder="Точка на Арбате"></label>
     <div class="form-grid">
       <label>Город<input name="city" maxlength="160" value="{{ shop.city if shop else '' }}"></label>
-      <label>Адрес<input name="address" maxlength="200" placeholder="улица и дом"></label>
-    </div>
-    <div class="form-grid">
-      <label>Широта<input name="latitude" type="number" step="any" min="-90" max="90" placeholder="55.7558"></label>
-      <label>Долгота<input name="longitude" type="number" step="any" min="-180" max="180" placeholder="37.6173"></label>
+      <label>Улица и дом<input name="address" maxlength="200" placeholder="Арбат, 1"></label>
     </div>
     <button class="btn secondary full">Добавить точку</button>
   </form>

@@ -7,7 +7,7 @@
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="shortcut icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/css/design.css?v=26"><script src="https://st.max.ru/js/max-web-app.js" async></script><script src="/static/js/max-auth.js?v=19" defer></script><script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" defer></script>{% block extra_head %}{% endblock %}<script src="/static/js/app.js?v=20" defer></script>
+<link rel="stylesheet" href="/static/css/design.css?v=29"><script src="https://st.max.ru/js/max-web-app.js" async></script><script src="/static/js/max-auth.js?v=20" defer></script><script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" defer></script>{% block extra_head %}{% endblock %}<script src="/static/js/app.js?v=24" defer></script>
 </head><body data-role="{{ user.role if user else '' }}" data-cabinet="{{ 'guest' if not user or user.guest_view else 'biz' }}" data-can-earn="{{ '1' if user and user.can_earn else '' }}" data-can-scan="{{ '1' if user and user.can_scan and not user.guest_view else '' }}" data-is-admin="{{ '1' if user and user.is_admin else '' }}" data-page="{{ tab }}"><div class="app-shell">
 <header class="site-top">
   <a class="site-top-brand" href="/">

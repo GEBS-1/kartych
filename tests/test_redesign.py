@@ -34,13 +34,18 @@ def test_new_pages_and_navigation(client):
         assert "/static/css/design.css" in response.text
     shops = client.get("/me/shops")
     assert "/static/vendor/leaflet/leaflet.min.js" in shops.text
+    assert 'id="locate-me"' in shops.text
+    assert 'id="map-query"' in shops.text
+    assert "Адрес, метро или название точки" in shops.text
     assert "cartocdn" not in shops.text
     js = client.get("/static/js/app.js").text
     assert "arcgisonline" not in js
     assert "attributionControl:false" in js.replace(" ", "")
     assert "prefix:false" in js.replace(" ", "")
-    assert "cup-max-login-opened" in js
-    assert "location.assign" in js
+    assert "cup-max-login-opened" not in js
+    assert "location.assign(maxUrl)" not in js
+    assert "/login/status/" in js
+    assert "locateOnMap" in js
     leaflet = client.get("/static/vendor/leaflet/leaflet.min.js").text
     assert "leaflet-attribution-flag" not in leaflet
     assert "#4C7BE1" not in leaflet

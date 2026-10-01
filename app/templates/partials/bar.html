@@ -2,23 +2,23 @@
 {% set guest = user.guest_view %}
 {% set owner = user.is_owner and not guest %}
 {% set staff = user.is_cashier and not guest %}
-{% set qr_scans = user.can_scan and not guest %}
 {% set place = bar_place|default('') %}
-{% set owner_links = [('analytics','/biz','chart','Аналитика'),('promos','/biz/promos','game','Игры'),('qr','/qr','qr','QR'),('scan','/biz/scan','search','Скан'),('settings','/settings','shop','Профиль')] %}
+{% set owner_links = [('analytics','/biz','chart','Аналитика'),('staff','/biz/staff','users','Сотрудники'),('scan','/biz/scan','qr','Скан'),('promos','/biz/promos','tag','Акции'),('settings','/settings','shop','Профиль')] %}
 {% set staff_links = [
   ('analytics','/biz','chart','Аналитика') if user.can_stats else ('cards','/me','cards','Карты'),
-  ('scan','/biz/scan','search','Скан') if user.can_scan else ('league','/me/league','trophy','Лига'),
-  ('qr', '/qr', 'qr', 'QR'),
+  ('league','/me/league','trophy','Лига'),
+  ('scan','/biz/scan','qr','Скан') if user.can_scan else ('qr', '/biz/earn' if user.can_earn else '/me/qr', 'qr', 'QR'),
   ('shops','/me/shops','pin','Рядом') if not user.can_edit else ('promos','/biz/promos','tag','Акции'),
   ('settings','/settings','user','Профиль')
 ] %}
-{% set guest_links = [('cards','/me','cards','Карты'),('league','/me/league','trophy','Лига'),('qr','/qr','qr','QR'),('shops','/me/shops','pin','Рядом'),('settings','/settings?view=guest','user','Профиль')] %}
+{% set guest_links = [('cards','/me','cards','Карты'),('league','/me/league','trophy','Лига'),('qr','/me/qr','qr','QR'),('shops','/me/shops','pin','Рядом'),('settings','/settings?view=guest','user','Профиль')] %}
 {% set links = owner_links if owner else (staff_links if staff else guest_links) %}
 <nav class="cup-bar{% if place == 'top' %} cup-bar-top{% endif %}" aria-label="{% if place == 'top' %}Кабинет сверху{% else %}Главная навигация{% endif %}">
 {% for key, href, symbol, label in links %}
-  <a href="{{ href }}" class="bar-item{% if key == tab %} is-on{% endif %}{% if key == 'qr' %} bar-qr{% endif %}" {% if key == tab %}aria-current="page"{% endif %}{% if key == 'qr' and qr_scans and place != 'top' %} id="scan-btn" aria-label="Считать QR гостя"{% elif key == 'scan' and not qr_scans and place != 'top' %} id="scan-btn" aria-label="Сканировать QR"{% elif key == 'qr' %} aria-label="Показать QR"{% endif %}>
+  {% set primary = key == 'qr' or (key == 'scan' and not guest) %}
+  <a href="{{ href }}" class="bar-item{% if key == tab %} is-on{% endif %}{% if primary %} bar-qr{% endif %}" {% if key == tab %}aria-current="page"{% endif %}{% if key == 'scan' and place != 'top' %} id="scan-btn" aria-label="Сканировать QR"{% elif key == 'qr' %} aria-label="Показать QR"{% endif %}>
     <span class="bar-icon">{{ icon(symbol) }}</span>
-    {% if key == 'qr' and place != 'top' %}<span class="sr-only">{{ 'Считать QR' if qr_scans else 'Показать QR' }}</span>{% else %}<span>{{ label }}</span>{% endif %}
+    {% if primary and place != 'top' %}<span class="sr-only">{{ 'Сканировать QR' if key == 'scan' else 'Показать QR' }}</span>{% else %}<span>{{ label }}</span>{% endif %}
   </a>
 {% endfor %}
 </nav>

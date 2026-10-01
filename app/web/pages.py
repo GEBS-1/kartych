@@ -35,6 +35,7 @@ from app.web.loyalty import (
     add_platform_admin,
     add_product,
     add_promo,
+    add_staff_by_max_id,
     add_telegram_subscriber,
     apply_for_business,
     apply_scan,
@@ -52,6 +53,7 @@ from app.web.loyalty import (
     extra_admin_ids,
     GAME_CATALOG,
     geocode_address,
+    geocode_places,
     guest_payload,
     guest_shop_profile,
     get_or_create_user,
@@ -62,6 +64,7 @@ from app.web.loyalty import (
     list_shop_staff,
     list_telegram_people,
     live_qr_payload,
+    map_shop_hits,
     normalize_schedule,
     parse_promo_start,
     parse_staff_start,
@@ -89,7 +92,9 @@ from app.web.loyalty import (
     shop_programs,
     shop_public,
     staff_for,
+    staff_week_board,
     telegram_alert_chats,
+    toggle_staff_day,
     ticket_payload,
     update_product,
     network_ids_for,
@@ -174,6 +179,8 @@ def launch_next(
         return "/biz/scan"
     if start.startswith("p_"):
         return "/me/qr"
+    if start.startswith("c_"):
+        return "/biz" if in_business else "/me"
     key = start.lower()
     if key in {"admin", "review"}:
         return "/admin" if is_admin else "/me"
@@ -259,6 +266,11 @@ async def _user(request: Request) -> CurrentUser | None:
         )
 
 
+def _login_max_url(bot_username: str, token: str) -> str:
+    bot = (bot_username or "t136_hakaton_max_bot").lstrip("@")
+    return f"https://max.ru/{bot}?startapp={tickets.payload(token)}"
+
+
 def _qr_svg(payload: str) -> str:
     return segno.make(payload, micro=False).svg_inline(scale=5, border=4, omitsize=True)
 
@@ -283,9 +295,9 @@ def _guest_mode(request: Request, *, is_owner: bool, is_cashier: bool) -> bool:
     if not (is_owner or is_cashier):
         return False
     path = request.url.path
-    if path.startswith("/me"):
+    if path.startswith("/me") or path.startswith("/admin"):
         return True
-    if path.startswith("/biz") or path.startswith("/admin"):
+    if path.startswith("/biz"):
         return False
     view = request.query_params.get("view") or request.cookies.get("cup_cabinet", "")
     return view == "guest"
@@ -332,12 +344,32 @@ def _coords(latitude: str, longitude: str) -> tuple[float, float] | None:
     return lat, lng
 
 
+async def _coords_or_geocode(
+    latitude: str,
+    longitude: str,
+    *,
+    city: str = "",
+    address: str = "",
+) -> tuple[float, float] | None:
+    coords = _coords(latitude, longitude)
+    if coords is not None:
+        return coords
+    street = address.strip()
+    town = city.strip()
+    if len(street) < 3:
+        return None
+    found = await geocode_address(street, city=town)
+    if found is None:
+        return None
+    return found["lat"], found["lng"]
+
+
 async def _notify_admins(request: Request, shop: Business) -> None:
     text = (
         "Новая заявка на точку в Картыч.\n"
         f"«{shop.name}» · {shop.city} {shop.address}\n"
         f"Сайт: {shop.website or 'нет'}\n"
-        f"ИНН: {shop.inn or 'нет'} · {shop.director_name or 'без ФИО'}\n"
+        f"ИНН: {shop.inn or 'нет'}\n"
         "Нажми кнопку и подтверди точку."
     )
     client = getattr(request.app.state, "max_client", None)
@@ -358,6 +390,24 @@ async def _notify_admins(request: Request, shop: Business) -> None:
                 await client.send_message(text=text, user_id=uid, attachments=attachments)
             except Exception:
                 continue
+
+
+async def _notify_person(request: Request, user_id: int, text: str, *, payload: str = "cabinet") -> None:
+    if user_id <= 0:
+        return
+    client = getattr(request.app.state, "max_client", None)
+    if client is None:
+        return
+    username = getattr(getattr(client, "settings", None), "max_bot_username", "") or ""
+    attachments = launch_app_keyboard(
+        bot_username=username,
+        payload=payload,
+        label="Открыть кабинет",
+    )
+    try:
+        await client.send_message(text=text, user_id=user_id, attachments=attachments)
+    except Exception:
+        return
 
 
 def _denied(
@@ -490,6 +540,9 @@ async def miniapp_auth(request: Request) -> JSONResponse:
         elif user.role == UserRole.NONE.value:
             user.role = UserRole.CLIENT.value
         start_param = (parsed.get("start_param") or "") if parsed is not None else ""
+        login_token = tickets.parse(start_param)
+        if login_token:
+            tickets.complete(login_token, user.max_user_id)
         token = parse_staff_start(start_param)
         if token:
             await accept_staff_invite(session, user, token)
@@ -525,6 +578,7 @@ async def miniapp_auth(request: Request) -> JSONResponse:
         settings.webhook_secret,
         uid,
         secure=settings.is_production or request.url.scheme == "https",
+        partitioned=True,
     )
     return response
 
@@ -828,6 +882,27 @@ async def login_page(request: Request):
         if nxt == "/admin":
             return RedirectResponse("/admin", status_code=303)
         return RedirectResponse(user.cabinet_path, status_code=303)
+    ticket = (request.query_params.get("ticket") or "").strip()
+    if tickets.peek(ticket) is not None or tickets.status(ticket) in {"pending", "ok", "used"}:
+        bot = request.app.state.settings.max_bot_username or "t136_hakaton_max_bot"
+        payload = tickets.payload(ticket)
+        max_url = _login_max_url(bot, ticket)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            _ctx(
+                request,
+                user=None,
+                title="Картыч · вход",
+                error="",
+                wait_token=ticket,
+                max_url=max_url,
+                login_payload=payload,
+                qr_svg=_qr_svg(max_url),
+                invite=invite,
+                promo=promo,
+            ),
+        )
     error = ""
     if request.query_params.get("err") == "expired":
         error = "Сессия входа истекла. Нажми «Войти через MAX» ещё раз."
@@ -841,6 +916,8 @@ async def login_page(request: Request):
             error=error,
             wait_token="",
             max_url="",
+            login_payload="",
+            qr_svg="",
             invite=invite,
             promo=promo,
         ),
@@ -860,7 +937,8 @@ async def login_max(
     token_promo = promo.strip() if len(promo.strip()) == 16 else ""
     token = tickets.create(role="client", invite=token_invite, promo=token_promo)
     bot = request.app.state.settings.max_bot_username or "t136_hakaton_max_bot"
-    max_url = f"https://max.ru/{bot}?start={tickets.payload(token)}"
+    payload = tickets.payload(token)
+    max_url = _login_max_url(bot, token)
     return templates.TemplateResponse(
         request,
         "login.html",
@@ -871,6 +949,8 @@ async def login_max(
             error="",
             wait_token=token,
             max_url=max_url,
+            login_payload=payload,
+            qr_svg=_qr_svg(max_url),
             invite=token_invite,
             promo=token_promo,
         ),
@@ -886,6 +966,9 @@ async def login_status(token: str) -> JSONResponse:
 async def login_complete(request: Request, token: str) -> RedirectResponse:
     item = tickets.consume(token)
     if item is None:
+        user = await _user(request)
+        if user is not None:
+            return RedirectResponse(user.cabinet_path, status_code=303)
         return RedirectResponse("/login?err=expired", status_code=303)
     settings = request.app.state.settings
     factory = request.app.state.session_factory
@@ -969,6 +1052,10 @@ async def logout(request: Request) -> RedirectResponse:
     response.delete_cookie("cup_session", path="/")
     response.delete_cookie("cup_point", path="/")
     if request.app.state.settings.is_production or request.url.scheme == "https":
+        response.headers.append(
+            "set-cookie",
+            "cup_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax",
+        )
         response.headers.append(
             "set-cookie",
             "cup_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=None; Partitioned",
@@ -1093,10 +1180,15 @@ async def biz_geocode(request: Request) -> JSONResponse:
     if user is None:
         return JSONResponse({"ok": False, "message": "Сначала войди"}, status_code=401)
     body = await request.json()
-    found = await geocode_address(str(body.get("q") or ""))
-    if found is None:
-        return JSONResponse({"ok": False, "message": "Адрес не найден. Укажи точку на карте."})
-    return JSONResponse({"ok": True, **found})
+    query = str(body.get("q") or "").strip()
+    city = str(body.get("city") or "").strip()
+    places = await geocode_places(query or city, limit=5, city=city)
+    if not places:
+        return JSONResponse(
+            {"ok": False, "places": [], "message": "Адрес не найден. Напиши город, улицу и номер дома."}
+        )
+    first = places[0]
+    return JSONResponse({"ok": True, "places": places, **first})
 
 
 @router.post("/biz/apply")
@@ -1107,7 +1199,6 @@ async def biz_apply_post(
     address: str = Form("", max_length=200),
     website: str = Form("", max_length=240),
     inn: str = Form(""),
-    director_name: str = Form(""),
     latitude: str = Form(""),
     longitude: str = Form(""),
 ) -> RedirectResponse:
@@ -1116,11 +1207,7 @@ async def biz_apply_post(
         return RedirectResponse("/login", status_code=303)
     if user.is_owner:
         return RedirectResponse("/biz", status_code=303)
-    coords = _coords(latitude, longitude)
-    if coords is None and address.strip():
-        found = await geocode_address(" ".join(part for part in [city, address, name] if part.strip()))
-        if found is not None:
-            coords = (found["lat"], found["lng"])
+    coords = await _coords_or_geocode(latitude, longitude, city=city, address=address)
     factory = request.app.state.session_factory
     async with factory() as session:
         db_user = await session.scalar(
@@ -1135,7 +1222,7 @@ async def biz_apply_post(
             city=city,
             address=address,
             inn=inn,
-            director_name=director_name,
+            director_name="",
             website=website,
             latitude=None if coords is None else coords[0],
             longitude=None if coords is None else coords[1],
@@ -1407,6 +1494,30 @@ async def me_shops_page(request: Request) -> HTMLResponse:
     )
 
 
+@router.post("/places/search")
+async def places_search(request: Request) -> JSONResponse:
+    user = await _user(request)
+    if user is None:
+        return JSONResponse({"ok": False, "message": "Сначала войди"}, status_code=401)
+    body = await request.json()
+    query = str(body.get("q") or "").strip()
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        shops = await shop_directory(session)
+        locations = {
+            loc.business_id: {"lat": loc.latitude, "lng": loc.longitude}
+            for loc in (await session.scalars(select(BusinessLocation))).all()
+        }
+        hits = map_shop_hits(shops, locations, query)
+    places: list[dict[str, Any]] = []
+    if len(query) >= 3 and request.app.state.settings.app_env != "test":
+        try:
+            places = await geocode_places(query, limit=5)
+        except Exception:
+            places = []
+    return JSONResponse({"ok": True, "shops": hits, "places": places})
+
+
 @router.post("/me/join/{shop_id}")
 async def join_shop(request: Request, shop_id: str) -> RedirectResponse:
     user = await _user(request)
@@ -1665,7 +1776,6 @@ async def biz_setup(
     latitude: str = Form(""),
     longitude: str = Form(""),
     inn: str = Form(""),
-    director_name: str = Form(""),
     org_name: str = Form(""),
 ) -> RedirectResponse:
     user = await _user(request)
@@ -1686,27 +1796,20 @@ async def biz_setup(
                 raise HTTPException(422, "Укажите название точки")
             brand = org_name.strip() or shop.org_name or shop.name
             shop.inn = inn_digits(inn)
-            shop.director_name = director_name.strip()
             shop.website = website.strip()[:240]
             shop.org_name = brand
             hq = await shop_for_owner(session, user.max_user_id)
             if hq is not None:
                 hq.org_name = brand
                 hq.inn = shop.inn
-                hq.director_name = shop.director_name
                 hq.website = shop.website
                 for point in await points_for_owner(session, user.max_user_id):
                     point.org_name = brand
                     point.inn = shop.inn
-                    point.director_name = shop.director_name
                     point.website = shop.website
-            coords = _coords(latitude, longitude)
+            coords = await _coords_or_geocode(latitude, longitude, city=city, address=address)
             if coords is not None:
                 await save_shop_location(session, shop, coords[0], coords[1])
-            else:
-                loc = await session.get(BusinessLocation, shop.id)
-                if loc:
-                    await session.delete(loc)
             await session.commit()
     return RedirectResponse("/settings", status_code=303)
 
@@ -1728,7 +1831,7 @@ async def add_point(
         hq = await shop_for_owner(session, user.max_user_id)
         if hq is None or not shop_is_live(hq):
             return RedirectResponse("/biz/apply", status_code=303)
-        coords = _coords(latitude, longitude)
+        coords = await _coords_or_geocode(latitude, longitude, city=city, address=address)
         await add_network_point(
             session,
             hq,
@@ -2014,7 +2117,58 @@ async def invite_staff(
             shift_to=shift_to,
         )
         await session.commit()
-    return RedirectResponse("/biz/staff?flash=" + quote("Ссылка для кассира готова"), status_code=303)
+    return RedirectResponse("/biz/staff?flash=" + quote("Ссылка для кассира готова. Отправь её человеку в MAX."), status_code=303)
+
+
+@router.post("/biz/staff/add")
+async def add_staff(
+    request: Request,
+    max_user_id: str = Form(""),
+    can_stats: str = Form(""),
+    can_earn: str = Form(""),
+    can_scan: str = Form(""),
+    can_edit: str = Form(""),
+    shift_from: str = Form("10:00"),
+    shift_to: str = Form("22:00"),
+) -> RedirectResponse:
+    user = await _user(request)
+    denied = _denied(user, owner_only=True)
+    if denied:
+        return denied
+    try:
+        uid = int(max_user_id.strip())
+    except ValueError:
+        return RedirectResponse("/biz/staff?flash=" + quote("Нужен числовой MAX id."), status_code=303)
+    form = await request.form()
+    days = [str(value) for value in form.getlist("days")]
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
+        if shop is None:
+            return RedirectResponse("/settings", status_code=303)
+        ok, message, row = await add_staff_by_max_id(
+            session,
+            shop,
+            uid,
+            can_stats=_flag(can_stats),
+            can_earn=_flag(can_earn),
+            can_scan=_flag(can_scan) or not any(_flag(item) for item in (can_stats, can_earn, can_edit)),
+            can_edit=_flag(can_edit),
+            schedule_days=",".join(days),
+            shift_from=shift_from,
+            shift_to=shift_to,
+        )
+        await session.commit()
+        shop_name = shop.name
+        label = schedule_label(row.schedule_days, row.shift_from, row.shift_to) if row else ""
+    if ok and row is not None:
+        await _notify_person(
+            request,
+            uid,
+            f"Тебя поставили в график «{shop_name}».\n{label}\nОткрой кабинет кассира в Картыче.",
+            payload="scan",
+        )
+    return RedirectResponse("/biz/staff?flash=" + quote(message), status_code=303)
 
 
 @router.get("/biz/staff", response_class=HTMLResponse)
@@ -2026,26 +2180,60 @@ async def biz_staff_page(request: Request) -> HTMLResponse:
     factory = request.app.state.session_factory
     bot = request.app.state.settings.max_bot_username or "t136_hakaton_max_bot"
     base = _public_base(request)
+    focus = (request.query_params.get("day") or "week").strip()
     async with factory() as session:
         shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
         staff_rows = await list_shop_staff(session, shop) if shop else []
         invites = await pending_invites(session, shop) if shop else []
+    board = staff_week_board(staff_rows)
+    if focus == "today":
+        board = [column for column in board if column["today"]]
+    elif focus in {key for key, _label in WEEKDAYS}:
+        board = [column for column in board if column["key"] == focus]
     return templates.TemplateResponse(
         request,
         "biz_staff.html",
         _ctx(
             request,
             user=user,
-            title="Сотрудники",
+            title="График смен",
             shop=shop,
             staff_rows=staff_rows,
             invites=invites,
             weekdays=WEEKDAYS,
+            board=board,
+            focus=focus,
             invite_site=f"{base}/join",
             invite_max=f"https://max.ru/{bot}?start=",
             tab="staff",
         ),
     )
+
+
+@router.post("/biz/staff/{staff_id}/shift")
+async def toggle_staff_shift(request: Request, staff_id: str, day: str = Form("")) -> RedirectResponse:
+    user = await _user(request)
+    denied = _denied(user, owner_only=True)
+    if denied:
+        return denied
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        shop = await shop_for_member(session, user.max_user_id, request.cookies.get("cup_point"))
+        row = await session.get(ShopStaff, staff_id)
+        if shop is None or row is None or row.business_id != shop.id or row.kind == "owner":
+            return RedirectResponse("/biz/staff", status_code=303)
+        toggle_staff_day(row, day)
+        await session.commit()
+        uid = row.max_user_id
+        shop_name = shop.name
+        label = schedule_label(row.schedule_days, row.shift_from, row.shift_to)
+    await _notify_person(
+        request,
+        uid,
+        f"График в «{shop_name}» обновили: {label}.",
+        payload="cabinet",
+    )
+    return RedirectResponse("/biz/staff?flash=" + quote("Смену обновили, человеку написали в MAX."), status_code=303)
 
 
 @router.post("/biz/staff/{staff_id}")
@@ -2072,19 +2260,35 @@ async def update_staff(
         row = await session.get(ShopStaff, staff_id)
         if shop is None or row is None or row.business_id != shop.id or row.kind == "owner":
             return RedirectResponse("/biz/staff", status_code=303)
+        uid = row.max_user_id
+        shop_name = shop.name
         if action == "remove":
             await session.delete(row)
-        else:
-            row.can_stats = _flag(can_stats)
-            row.can_earn = _flag(can_earn)
-            row.can_scan = _flag(can_scan)
-            row.can_edit = _flag(can_edit)
-            days_value, start, end = normalize_schedule(days, shift_from, shift_to)
-            row.schedule_days = days_value
-            row.shift_from = start
-            row.shift_to = end
+            await session.commit()
+            await _notify_person(
+                request,
+                uid,
+                f"Тебя сняли с графика «{shop_name}». Кабинет кассира этой точки закрыт.",
+                payload="cabinet",
+            )
+            return RedirectResponse("/biz/staff?flash=" + quote("Человека убрали и написали ему в MAX."), status_code=303)
+        row.can_stats = _flag(can_stats)
+        row.can_earn = _flag(can_earn)
+        row.can_scan = _flag(can_scan)
+        row.can_edit = _flag(can_edit)
+        days_value, start, end = normalize_schedule(days, shift_from, shift_to)
+        row.schedule_days = days_value
+        row.shift_from = start
+        row.shift_to = end
         await session.commit()
-    return RedirectResponse("/biz/staff?flash=" + quote("Сотрудники обновлены"), status_code=303)
+        label = schedule_label(days_value, start, end)
+    await _notify_person(
+        request,
+        uid,
+        f"График в «{shop_name}» сохранили: {label}.",
+        payload="cabinet",
+    )
+    return RedirectResponse("/biz/staff?flash=" + quote("График сохранили, человеку написали в MAX."), status_code=303)
 
 
 def _qr_destination(user: CurrentUser) -> str:

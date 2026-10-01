@@ -3,6 +3,7 @@
 (function () {
   let running = false;
   let attempted = false;
+  let askedAllow = false;
   function launchData() {
     const bridge = window.WebApp;
     if (typeof bridge?.initData === "string" && bridge.initData) return bridge.initData;
@@ -10,7 +11,19 @@
     const values = params.getAll("WebAppData");
     return values.length === 1 ? values[0] : "";
   }
+  function hasMaxBridge() {
+    try {
+      const bridge = window.WebApp;
+      if (!bridge) return false;
+      if (bridge.platform) return true;
+      if (typeof bridge.ready === "function") return true;
+      if (typeof bridge.initData === "string") return true;
+      if (bridge.initDataUnsafe) return true;
+    } catch {}
+    return false;
+  }
   function inMaxWebApp() {
+    if (hasMaxBridge() && launchData()) return true;
     try {
       if (typeof window.WebApp?.initData === "string" && window.WebApp.initData) return true;
       if (window.WebApp?.initDataUnsafe?.user) return true;
@@ -67,8 +80,37 @@
     const box = document.getElementById("toast");
     if (box) { box.textContent = message; box.hidden = false; }
   }
+  function wakeBridge() {
+    try { window.WebApp?.ready?.(); } catch {}
+    try { window.WebApp?.expand?.(); } catch {}
+  }
+  function openInBrowser() {
+    const token = document.getElementById("max-wait")?.dataset?.token;
+    const url = token
+      ? window.location.origin + "/login?ticket=" + encodeURIComponent(token)
+      : window.location.origin + (window.location.pathname === "/app" ? "/login" : window.location.pathname + window.location.search);
+    try {
+      if (typeof window.WebApp?.openLink === "function") {
+        window.WebApp.openLink(url);
+        return;
+      }
+    } catch {}
+    window.location.assign(url);
+  }
+  function showNeedAllow() {
+    askedAllow = true;
+    document.documentElement.classList.add("miniapp");
+    showError("Нажми «Разрешить» во всплывающем окне MAX. Без этого вход не работает. Кнопка «Старт» не нужна — она в MAX часто не нажимается.");
+    const login = document.getElementById("max-login-link");
+    if (login) login.hidden = true;
+    const browser = document.getElementById("max-browser");
+    if (browser) browser.hidden = false;
+    const allow = document.getElementById("max-allow");
+    if (allow) allow.hidden = false;
+  }
   async function boot() {
     if (running || attempted) return;
+    wakeBridge();
     const path = window.location.pathname || "";
     const atRoot = path === "/" || path === "";
     if (document.body.dataset.role && !onLauncher()) {
@@ -81,7 +123,10 @@
       return;
     }
     const raw = launchData();
-    if (!raw) return;
+    if (!raw) {
+      if (hasMaxBridge()) showNeedAllow();
+      return;
+    }
     running = true;
     document.documentElement.classList.add("miniapp");
     try { sessionStorage.setItem("cup-miniapp", "1"); } catch {}
@@ -94,14 +139,17 @@
       });
       if (!response.ok) {
         attempted = true;
-        showError("MAX не подтвердил вход. Закрой и заново открой мини-приложение в MAX.");
+        showNeedAllow();
+        showError("MAX не подтвердил вход. Нажми «Разрешить» и открой кабинет кнопкой в боте, не «Старт».");
         return;
       }
       const data = await response.json();
       const session = await fetch("/app/session", {credentials: "include", cache: "no-store"});
       attempted = true;
       if (!session.ok) {
-        showError("Это окно блокирует сохранение входа. Открой мини-приложение кнопкой в MAX или разреши cookie для сайта.");
+        showError("Это окно блокирует сохранение входа. Нажми «Открыть в браузере».");
+        const browser = document.getElementById("max-browser");
+        if (browser) browser.hidden = false;
         return;
       }
       const live = data.role === "business" || document.body.dataset.canEarn === "1";
@@ -110,11 +158,27 @@
       showError("Не удалось восстановить вход. Проверяем соединение…");
     } finally { running = false; }
   }
+  document.addEventListener("click", (event) => {
+    const allow = event.target.closest?.("#max-allow");
+    if (allow) {
+      event.preventDefault();
+      attempted = false;
+      askedAllow = false;
+      wakeBridge();
+      boot();
+      return;
+    }
+    const browser = event.target.closest?.("#max-browser");
+    if (browser) {
+      event.preventDefault();
+      openInBrowser();
+    }
+  });
   let tries = 0;
   boot();
   const timer = setInterval(() => {
     tries += 1;
-    if (attempted || tries >= 40) { clearInterval(timer); return; }
+    if (attempted || tries >= 120) { clearInterval(timer); return; }
     boot();
   }, 250);
   window.addEventListener("pageshow", () => {

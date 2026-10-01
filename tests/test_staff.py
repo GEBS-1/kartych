@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import re
+
 from tests.test_session import signed_launch
 
 from app.web.loyalty import guest_payload, promo_start_payload, staff_start_payload
@@ -77,6 +81,40 @@ def test_staff_invite_scan_and_charge(client, app) -> None:
     client.post("/app/auth", json={"init_data": guest})
     cards = client.get("/me")
     assert "Моя точка" in cards.text
+
+
+def test_staff_week_board_add_by_max_id(client, app) -> None:
+    client.post("/login/demo", data={"role": "business"})
+    page = client.get("/biz/staff")
+    assert page.status_code == 200
+    assert "График смен" in page.text
+    assert 'action="/biz/staff/add"' in page.text
+    assert "Неделя" in page.text
+    bad = client.post("/biz/staff/add", data={"max_user_id": "-22", "can_scan": "on"}, follow_redirects=True)
+    assert "владелец" in bad.text.lower()
+    added = client.post(
+        "/biz/staff/add",
+        data={"max_user_id": "77", "can_scan": "on", "days": ["mon", "tue"], "shift_from": "10:00", "shift_to": "18:00"},
+        follow_redirects=True,
+    )
+    assert added.status_code == 200
+    assert "MAX id 77" in added.text
+    assert "/biz/staff/" in added.text
+    kwargs = app.state.max_client.send_message.await_args.kwargs
+    assert kwargs["user_id"] == 77
+    assert "график" in kwargs["text"].lower()
+    found = re.search(r'action="/biz/staff/([^"/]+)/shift"', added.text)
+    assert found is not None
+    staff_id = found.group(1)
+    assert len(staff_id) >= 8
+    toggled = client.post(f"/biz/staff/{staff_id}/shift", data={"day": "mon"}, follow_redirects=True)
+    assert toggled.status_code == 200
+    assert "Смену обновили" in toggled.text
+    removed = client.post(f"/biz/staff/{staff_id}", data={"action": "remove"}, follow_redirects=True)
+    assert removed.status_code == 200
+    assert "убрали" in removed.text.lower()
+    note = app.state.max_client.send_message.await_args.kwargs["text"].lower()
+    assert "сняли" in note
 
 
 def test_staff_max_start_invite(client, app) -> None:

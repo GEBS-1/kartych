@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from unittest.mock import AsyncMock
 from urllib.parse import quote
 
 from fastapi.testclient import TestClient
@@ -76,6 +77,32 @@ def test_secure_cookie_supports_embedded_max_and_logout(settings):
         assert client.get("/app/session").status_code == 401
 
 
+def test_web_login_cookie_is_first_party(settings):
+    app = create_app(settings)
+    with TestClient(app, base_url="https://example.test") as client:
+        app.state.max_client.send_message = AsyncMock(return_value={"ok": True})
+        wait = client.post("/login", data={"role": "client"})
+        token = wait.text.split('data-token="', 1)[1].split('"', 1)[0]
+        client.post(
+            "/webhook",
+            json={
+                "update_type": "bot_started",
+                "timestamp": 1,
+                "chat_id": 77,
+                "user": {"user_id": 77, "name": "Гость"},
+                "payload": f"c_{token}",
+            },
+            headers={"X-Max-Bot-Api-Secret": settings.webhook_secret},
+        )
+        done = client.get(f"/login/complete/{token}", follow_redirects=False)
+        cookie = done.headers["set-cookie"]
+        assert "Secure" in cookie
+        assert "HttpOnly" in cookie
+        assert "SameSite=lax" in cookie
+        assert "Partitioned" not in cookie
+        assert done.headers["location"] == "/me"
+
+
 def test_cross_site_write_rejected(client):
     client.post("/login/demo", data={"role": "client"})
     assert (
@@ -119,6 +146,22 @@ def test_signed_cabinet_payload_returns_guest_home(client, app):
     response = client.post("/app/auth", json={"init_data": launch})
     assert response.status_code == 200
     assert response.json()["next"] == "/me"
+
+
+def test_miniapp_startapp_completes_website_login(client, app):
+    wait = client.post("/login", data={"role": "client"})
+    token = wait.text.split('data-token="', 1)[1].split('"', 1)[0]
+    launch = signed_launch(
+        app.state.settings.max_bot_token,
+        start_param=f"c_{token}",
+        user='{"id": 5151, "first_name": "Олег"}',
+    )
+    response = client.post("/app/auth", json={"init_data": launch})
+    assert response.status_code == 200
+    assert client.get(f"/login/status/{token}").json()["status"] == "ok"
+    client.cookies.clear()
+    done = client.get(f"/login/complete/{token}", follow_redirects=True)
+    assert "Привет, Олег" in done.text
 
 
 def test_signed_admin_payload_opens_review_queue(client, app):

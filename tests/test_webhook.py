@@ -146,3 +146,27 @@ def test_ping_echo(client, app) -> None:
     assert response.status_code == 200
     app.state.max_client.send_message.assert_awaited()
     assert "pong" in app.state.max_client.send_message.await_args.kwargs["text"]
+
+
+def test_returning_user_start_message_completes_web_login(client, app) -> None:
+    wait = client.post("/login", data={"role": "client"})
+    token = wait.text.split('data-token="', 1)[1].split('"', 1)[0]
+    response = client.post(
+        "/webhook",
+        json={
+            "update_type": "message_created",
+            "timestamp": 1,
+            "message": {
+                "sender": {"user_id": 88, "name": "Оля"},
+                "recipient": {"chat_id": 88, "user_id": 88},
+                "body": {"text": f"/start c_{token}"},
+            },
+        },
+        headers={"X-Max-Bot-Api-Secret": "secret123"},
+    )
+    assert response.status_code == 200
+    assert client.get(f"/login/status/{token}").json()["status"] == "ok"
+    kwargs = app.state.max_client.send_message.await_args.kwargs
+    assert "подтвержд" in kwargs["text"].lower()
+    done = client.get(f"/login/complete/{token}", follow_redirects=True)
+    assert "Привет, Оля" in done.text

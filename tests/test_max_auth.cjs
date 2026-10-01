@@ -4,13 +4,25 @@ const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 const source = readFileSync('app/static/js/max-auth.js', 'utf8');
 
-function harness({ hash = '', cookie = true, role = '', pathname = '/me', search = '', isAdmin = false } = {}) {
+function harness({ hash = '', cookie = true, role = '', pathname = '/me', search = '', isAdmin = false, webApp } = {}) {
   const calls = [], redirects = [], timers = [];
   const status = {}, toast = {};
-  const window = { location: { hash, search, pathname, replace: url => redirects.push(url) }, addEventListener() {} };
+  const window = { location: { hash, search, pathname, origin: 'https://kartych.test', replace: url => redirects.push(url), assign: url => redirects.push(url) }, addEventListener() {} };
+  if (webApp) window.WebApp = webApp;
+  const elements = { toast };
   const context = {
     window, URLSearchParams,
-    document: { body: { dataset: { role, cabinet: role === 'business' ? 'biz' : 'guest', canEarn: role === 'business' ? '1' : '', canScan: role === 'business' ? '1' : '', isAdmin: isAdmin ? '1' : '' } }, documentElement: { classList: { add() {} } }, querySelector: () => status, getElementById: () => toast },
+    document: {
+      body: { dataset: { role, cabinet: role === 'business' ? 'biz' : 'guest', canEarn: role === 'business' ? '1' : '', canScan: role === 'business' ? '1' : '', isAdmin: isAdmin ? '1' : '' } },
+      documentElement: { classList: { add() {} } },
+      querySelector: () => status,
+      getElementById: (id) => {
+        if (id === 'toast') return toast;
+        if (!elements[id]) elements[id] = { id, hidden: false, textContent: '', dataset: {} };
+        return elements[id];
+      },
+      addEventListener() {},
+    },
     sessionStorage: { setItem() { throw new Error('Storage unavailable'); } },
     sessionStorage: { setItem() { throw new Error('Storage unavailable'); } },
     fetch: async (url, options) => {
@@ -118,4 +130,17 @@ test('browser landing stays open without MAX webapp', async () => {
   await settle();
   assert.equal(state.calls.length, 0);
   assert.deepEqual(state.redirects, []);
+});
+
+test('MAX without allow calls ready and does not bounce to login', async () => {
+  const ready = [];
+  const state = harness({
+    pathname: '/app',
+    webApp: { initData: '', platform: 'web', ready: () => ready.push(1), openLink() {} },
+  });
+  await settle();
+  assert.ok(ready.length >= 1);
+  assert.equal(state.calls.length, 0);
+  assert.deepEqual(state.redirects, []);
+  assert.match(String(state.toast.textContent || ''), /Разрешить/);
 });
